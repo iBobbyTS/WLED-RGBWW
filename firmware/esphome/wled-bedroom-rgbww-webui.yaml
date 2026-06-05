@@ -1,0 +1,11 @@
+packages:
+  common: !include wled-bedroom-rgbww-common.yaml
+
+esphome:
+  build_path: build/wled-bedroom-rgbww-webui
+
+web_server:
+  port: 80
+  auth:
+    username: !secret web_username
+    password: !secret web_password
