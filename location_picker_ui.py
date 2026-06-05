@@ -22,6 +22,7 @@ LOCATION_TMP_DIR = PROJECT_TMP_DIR / "location-ui"
 CONFIG_LOCATION_DIR = PROJECT_ROOT / "config" / "location"
 
 DEFAULT_TARGET_MAX = 49152
+DEFAULT_MAX_EXPOSURE_TRIALS = 3
 DEFAULT_ISO = "100"
 DEFAULT_APERTURE = "4"
 DEFAULT_MIN_SHUTTER_SPEED = "1/8000"
@@ -271,6 +272,7 @@ class LocationPickerApp:
                 image_format="RAW",
                 min_shutter_speed=self.args.min_shutter_speed,
                 max_shutter_speed=self.args.max_shutter_speed,
+                max_trials=self.args.max_exposure_trials,
                 decode_output_dir=run_dir / "decoded",
                 decode_formats=("npy",),
                 port=self.args.port,
@@ -516,6 +518,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--aperture", default=DEFAULT_APERTURE)
     parser.add_argument("--min-shutter-speed", default=DEFAULT_MIN_SHUTTER_SPEED)
     parser.add_argument("--max-shutter-speed", default=DEFAULT_MAX_SHUTTER_SPEED)
+    parser.add_argument("--max-exposure-trials", type=int, default=DEFAULT_MAX_EXPOSURE_TRIALS)
     parser.add_argument("--model", default=camera_gphoto2.DEFAULT_CAMERA_MODEL)
     parser.add_argument("--port")
     parser.add_argument("--gphoto2", default="gphoto2")

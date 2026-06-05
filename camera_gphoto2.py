@@ -22,6 +22,7 @@ DEFAULT_FILENAME_TEMPLATE = "%Y%m%d-%H%M%S.%C"
 DEFAULT_DECODE_STEM_SUFFIX = ".rawpy-linear-camera-rgb16"
 DEFAULT_DECODE_FORMATS = ("npy", "tiff")
 DEFAULT_AUTO_EXPOSURE_MAX = 49152
+DEFAULT_AUTO_EXPOSURE_MAX_TRIALS = 5
 DEFAULT_MIN_SHUTTER_SPEED = "1/8000"
 DEFAULT_MAX_SHUTTER_SPEED = "30"
 
@@ -249,6 +250,37 @@ def read_config_choices(
     return choices
 
 
+def read_config_current_and_choices(
+    port: str,
+    config_path: str,
+    *,
+    runner: Runner | None = None,
+    executable: str = "gphoto2",
+    timeout: float = 30.0,
+) -> tuple[str, list[str]]:
+    output = _run(
+        ["--port", port, "--get-config", config_path],
+        runner=runner,
+        executable=executable,
+        timeout=timeout,
+    )
+    current: str | None = None
+    choices: list[str] = []
+    for line in output.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Current:"):
+            current = stripped.split(":", 1)[1].strip()
+            continue
+        match = re.match(r"^Choice:\s+\d+\s+(?P<value>.+)$", stripped)
+        if match:
+            choices.append(match.group("value").strip())
+    if current is None:
+        raise GPhoto2Error(f"could not read current value for {config_path}")
+    if not choices:
+        raise GPhoto2Error(f"could not read choices for {config_path}")
+    return current, choices
+
+
 def capture_image(
     *,
     output_dir: str | Path,
@@ -446,6 +478,7 @@ def auto_expose_capture(
     image_format: str = DEFAULT_IMAGE_FORMAT,
     min_shutter_speed: str = DEFAULT_MIN_SHUTTER_SPEED,
     max_shutter_speed: str = DEFAULT_MAX_SHUTTER_SPEED,
+    max_trials: int = DEFAULT_AUTO_EXPOSURE_MAX_TRIALS,
     shutter_speeds: Sequence[str] | None = None,
     decode_output_dir: str | Path | None = None,
     decode_formats: Sequence[str] = DEFAULT_DECODE_FORMATS,
@@ -460,6 +493,8 @@ def auto_expose_capture(
 ) -> AutoExposureResult:
     if target_max <= 0:
         raise GPhoto2Error("target_max must be positive")
+    if max_trials <= 0:
+        raise GPhoto2Error("max_trials must be positive")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -474,27 +509,53 @@ def auto_expose_capture(
             timeout=timeout,
         )
     )
-    candidates = _select_shutter_candidates(
-        connection.port,
-        min_shutter_speed=min_shutter_speed,
-        max_shutter_speed=max_shutter_speed,
-        shutter_speeds=shutter_speeds,
-        runner=runner,
-        executable=executable,
-        timeout=timeout,
-    )
+    if shutter_speeds is None:
+        current_shutter, shutter_choices = read_config_current_and_choices(
+            connection.port,
+            CONFIG_SHUTTER_SPEED,
+            runner=runner,
+            executable=executable,
+            timeout=timeout,
+        )
+        candidates = _bounded_shutter_candidates(
+            shutter_choices,
+            min_shutter_speed=min_shutter_speed,
+            max_shutter_speed=max_shutter_speed,
+        )
+    else:
+        candidates = _select_shutter_candidates(
+            connection.port,
+            min_shutter_speed=min_shutter_speed,
+            max_shutter_speed=max_shutter_speed,
+            shutter_speeds=shutter_speeds,
+            runner=runner,
+            executable=executable,
+            timeout=timeout,
+        )
+        current_shutter = read_current_value(
+            connection.port,
+            CONFIG_SHUTTER_SPEED,
+            runner=runner,
+            executable=executable,
+            timeout=timeout,
+        )
+
+    candidate_seconds = tuple(_parse_shutter_seconds(candidate) for candidate in candidates)
+    try:
+        current_seconds = _parse_shutter_seconds(current_shutter)
+    except GPhoto2Error:
+        current_seconds = _parse_shutter_seconds(DEFAULT_SHUTTER_SPEED)
 
     trials: list[AutoExposureTrial] = []
     best_index: int | None = None
-    low = 0
-    high = len(candidates) - 1
+    current_index = _nearest_shutter_index(candidate_seconds, current_seconds)
+    tested_indices: set[int] = set()
     PROJECT_TMP_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="auto-exposure-", dir=PROJECT_TMP_DIR) as tmpdir:
         trial_dir = Path(tmpdir) / "trials"
         trial_decode_dir = Path(tmpdir) / "decoded"
-        while low <= high:
-            mid = (low + high) // 2
-            shutter_speed = candidates[mid]
+        while current_index not in tested_indices and len(trials) < max_trials:
+            shutter_speed = candidates[current_index]
             trial = _capture_decode_trial(
                 index=len(trials),
                 output_dir=trial_dir,
@@ -518,19 +579,30 @@ def auto_expose_capture(
                 delete_after=True,
             )
             trials.append(trial)
+            tested_indices.add(current_index)
             if trial.accepted:
-                best_index = mid
-                low = mid + 1
-            else:
-                high = mid - 1
+                best_index = current_index
+
+            next_index = _next_shutter_index_from_measurement(
+                candidate_seconds,
+                current_index=current_index,
+                decoded_max=trial.decoded_max,
+                target_max=target_max,
+            )
+            if next_index == current_index:
+                break
+            current_index = next_index
 
     if best_index is None:
         trial_summary = ", ".join(f"{trial.shutter_speed}={trial.decoded_max}" for trial in trials)
         raise GPhoto2Error(f"no shutter speed met decoded max <= {target_max}; trials: {trial_summary}")
 
     rejected_finals: list[AutoExposureTrial] = []
-    for candidate_index in range(best_index, -1, -1):
-        shutter_speed = candidates[candidate_index]
+    final_index = best_index
+    tried_final_indices: set[int] = set()
+    while final_index not in tried_final_indices and len(rejected_finals) < max_trials:
+        tried_final_indices.add(final_index)
+        shutter_speed = candidates[final_index]
         final_result = capture_image(
             output_dir=output_path,
             filename_template=filename_template,
@@ -579,6 +651,15 @@ def auto_expose_capture(
             )
         )
         _delete_capture_outputs(final_result)
+        next_final_index = _next_shutter_index_from_measurement(
+            candidate_seconds,
+            current_index=final_index,
+            decoded_max=decoded_max,
+            target_max=target_max,
+        )
+        if next_final_index >= final_index:
+            break
+        final_index = next_final_index
 
     raise GPhoto2Error(f"final capture could not meet decoded max <= {target_max}")
 
@@ -624,6 +705,19 @@ def _select_shutter_candidates(
             timeout=timeout,
         )
     )
+    return _bounded_shutter_candidates(
+        choices,
+        min_shutter_speed=min_shutter_speed,
+        max_shutter_speed=max_shutter_speed,
+    )
+
+
+def _bounded_shutter_candidates(
+    choices: Sequence[str],
+    *,
+    min_shutter_speed: str,
+    max_shutter_speed: str,
+) -> tuple[str, ...]:
     min_seconds = _parse_shutter_seconds(min_shutter_speed)
     max_seconds = _parse_shutter_seconds(max_shutter_speed)
     if min_seconds > max_seconds:
@@ -647,6 +741,38 @@ def _select_shutter_candidates(
     if not candidates:
         raise GPhoto2Error("no shutter speed candidates available in the requested range")
     return tuple(candidates)
+
+
+def _nearest_shutter_index(candidates: Sequence[Fraction], seconds: Fraction) -> int:
+    if not candidates:
+        raise GPhoto2Error("no shutter speed candidates available")
+    return min(range(len(candidates)), key=lambda index: abs(candidates[index] - seconds))
+
+
+def _floor_shutter_index(candidates: Sequence[Fraction], seconds: Fraction) -> int:
+    if not candidates:
+        raise GPhoto2Error("no shutter speed candidates available")
+    chosen = 0
+    for index, candidate_seconds in enumerate(candidates):
+        if candidate_seconds <= seconds:
+            chosen = index
+        else:
+            break
+    return chosen
+
+
+def _next_shutter_index_from_measurement(
+    candidates: Sequence[Fraction],
+    *,
+    current_index: int,
+    decoded_max: int,
+    target_max: int,
+) -> int:
+    if decoded_max <= 0:
+        return len(candidates) - 1
+
+    desired_seconds = candidates[current_index] * Fraction(target_max, decoded_max)
+    return _floor_shutter_index(candidates, desired_seconds)
 
 
 def _parse_shutter_seconds(value: str) -> Fraction:
@@ -891,6 +1017,12 @@ def main(argv: list[str] | None = None) -> int:
     auto_parser.add_argument("--min-shutter-speed", default=DEFAULT_MIN_SHUTTER_SPEED)
     auto_parser.add_argument("--max-shutter-speed", default=DEFAULT_MAX_SHUTTER_SPEED)
     auto_parser.add_argument(
+        "--max-trials",
+        type=int,
+        default=DEFAULT_AUTO_EXPOSURE_MAX_TRIALS,
+        help="Maximum temporary exposure trials before saving the best accepted exposure.",
+    )
+    auto_parser.add_argument(
         "--shutter-speed",
         action="append",
         dest="shutter_speeds",
@@ -966,6 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
                 image_format=args.image_format,
                 min_shutter_speed=args.min_shutter_speed,
                 max_shutter_speed=args.max_shutter_speed,
+                max_trials=args.max_trials,
                 shutter_speeds=args.shutter_speeds,
                 decode_output_dir=args.decode_output_dir,
                 decode_formats=args.decode_formats or DEFAULT_DECODE_FORMATS,

@@ -8,6 +8,15 @@ import camera_gphoto2
 import location_picker_ui
 
 
+class LocationArgsTests(unittest.TestCase):
+    def test_parse_args_includes_exposure_trial_limit(self):
+        default_args = location_picker_ui.parse_args([])
+        custom_args = location_picker_ui.parse_args(["--max-exposure-trials", "3"])
+
+        self.assertEqual(default_args.max_exposure_trials, location_picker_ui.DEFAULT_MAX_EXPOSURE_TRIALS)
+        self.assertEqual(custom_args.max_exposure_trials, 3)
+
+
 class LocationPreviewTests(unittest.TestCase):
     def test_linear_rgb_to_preview_uint8_scales_and_clips(self):
         image = np.array([[[0, 24576, 49152], [65535, 49152, 0]]], dtype=np.uint16)

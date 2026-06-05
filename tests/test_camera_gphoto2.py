@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,27 @@ Canon EOS R6 Mark III          usb:001,010
             camera_gphoto2.parse_auto_detect(output),
             [camera_gphoto2.CameraConnection("Canon EOS R6 Mark III", "usb:001,010")],
         )
+
+    def test_read_config_current_and_choices_parses_single_gphoto2_output(self):
+        def runner(args):
+            self.assertEqual(list(args), ["--port", "usb:001,010", "--get-config", camera_gphoto2.CONFIG_SHUTTER_SPEED])
+            return camera_gphoto2.CommandOutput(
+                "Label: Shutter Speed\n"
+                "Current: 1/125\n"
+                "Choice: 0 bulb\n"
+                "Choice: 1 1/125\n"
+                "Choice: 2 1/60\n"
+                "END\n"
+            )
+
+        current, choices = camera_gphoto2.read_config_current_and_choices(
+            "usb:001,010",
+            camera_gphoto2.CONFIG_SHUTTER_SPEED,
+            runner=runner,
+        )
+
+        self.assertEqual(current, "1/125")
+        self.assertEqual(choices, ["bulb", "1/125", "1/60"])
 
 
 class CameraGPhoto2CaptureTests(unittest.TestCase):
@@ -226,7 +248,8 @@ class CameraGPhoto2AutoExposureTests(unittest.TestCase):
         self.assertEqual(candidates, ("1/100", "1/10", "1"))
 
     def test_auto_expose_deletes_trials_and_saves_only_final_capture(self):
-        current_shutter = {"value": None}
+        current_shutter = {"value": "1/100"}
+        trial_shutters = []
         trial_raw_paths = []
         trial_decode_paths = []
         trial_workspace_roots = set()
@@ -255,6 +278,7 @@ class CameraGPhoto2AutoExposureTests(unittest.TestCase):
                 filename.parent.mkdir(parents=True, exist_ok=True)
                 filename.write_text(str(current_shutter["value"]), encoding="utf-8")
                 if filename.name.startswith("trial-"):
+                    trial_shutters.append(current_shutter["value"])
                     trial_raw_paths.append(filename)
                     trial_workspace_roots.add(filename.parent.parent)
                 return camera_gphoto2.CommandOutput(
@@ -302,6 +326,7 @@ class CameraGPhoto2AutoExposureTests(unittest.TestCase):
             final_decode_file = decode_dir / "final.json"
             self.assertTrue(final_file.exists())
             self.assertTrue(final_decode_file.exists())
+            self.assertEqual(trial_shutters, ["1/100", "1/25", "1/50"])
             self.assertEqual(result.final_capture.settings.shutter_speed, "1/50")
             self.assertEqual(result.final_capture.decoded.stats["image"]["max"], 48000)
             self.assertLessEqual(result.final_capture.decoded.stats["image"]["max"], 49152)
@@ -311,6 +336,114 @@ class CameraGPhoto2AutoExposureTests(unittest.TestCase):
         self.assertFalse(any(path.exists() for path in trial_raw_paths))
         self.assertFalse(any(path.exists() for path in trial_decode_paths))
         self.assertFalse(any(path.exists() for path in trial_workspace_roots))
+
+    def test_auto_expose_limits_trial_count_and_saves_best_accepted_capture(self):
+        current_shutter = {"value": "1/100"}
+        trial_shutters = []
+        max_by_shutter = {
+            "1/100": 29000,
+            "1/60": 32000,
+            "1/40": 30000,
+            "1/25": 40000,
+        }
+
+        def runner(args):
+            if args == ["--auto-detect"]:
+                return camera_gphoto2.CommandOutput(
+                    "Model                          Port\n"
+                    "----------------------------------------------------------\n"
+                    "Canon EOS R6 Mark III          usb:001,010\n"
+                )
+            if "--set-config" in args:
+                for value in args:
+                    if value.startswith(f"{camera_gphoto2.CONFIG_SHUTTER_SPEED}="):
+                        current_shutter["value"] = value.split("=", 1)[1]
+                return camera_gphoto2.CommandOutput("")
+            if args == ["--port", "usb:001,010", "--get-config", camera_gphoto2.CONFIG_SHUTTER_SPEED]:
+                return camera_gphoto2.CommandOutput(f"Label: Shutter Speed\nCurrent: {current_shutter['value']}\nEND\n")
+            if "--capture-image-and-download" in args:
+                filename = Path(args[args.index("--filename") + 1])
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                filename.write_text(current_shutter["value"], encoding="utf-8")
+                if filename.name.startswith("trial-"):
+                    trial_shutters.append(current_shutter["value"])
+                return camera_gphoto2.CommandOutput(
+                    f"New file is in location /capt0001.cr3 on the camera\nSaving file as {filename}\n"
+                )
+            raise AssertionError(args)
+
+        def decoder(raw_file, *, output_dir=None, formats=("npy",)):
+            raw_path = Path(raw_file)
+            decoded_max = max_by_shutter[raw_path.read_text(encoding="utf-8")]
+            target_dir = Path(output_dir) if output_dir is not None else raw_path.parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+            output_file = target_dir / f"{raw_path.stem}.json"
+            output_file.write_text("{}", encoding="utf-8")
+            return camera_gphoto2.DecodeResult(
+                source_file=raw_path,
+                output_files=(output_file,),
+                metadata_file=output_file,
+                image_shape=(2, 2, 3),
+                image_dtype="uint16",
+                stats={"image": {"max": decoded_max}, "raw_visible": {"max": decoded_max // 4}},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = camera_gphoto2.auto_expose_capture(
+                output_dir=Path(tmpdir) / "final",
+                filename_template="final.cr3",
+                target_max=49152,
+                max_trials=2,
+                shutter_speeds=("1/100", "1/60", "1/40", "1/25"),
+                decode_output_dir=Path(tmpdir) / "decoded",
+                decode_formats=("npy",),
+                runner=runner,
+                decoder=decoder,
+            )
+
+        self.assertEqual(trial_shutters, ["1/100", "1/60"])
+        self.assertEqual(len(result.trials), 2)
+        self.assertEqual(result.final_capture.settings.shutter_speed, "1/60")
+
+    def test_next_shutter_index_uses_linear_exposure_ratio(self):
+        candidates = tuple(Fraction(value) for value in ("1/100", "1/50", "1/25", "1/10"))
+
+        self.assertEqual(
+            camera_gphoto2._next_shutter_index_from_measurement(
+                candidates,
+                current_index=0,
+                decoded_max=10000,
+                target_max=49152,
+            ),
+            2,
+        )
+        self.assertEqual(
+            camera_gphoto2._next_shutter_index_from_measurement(
+                candidates,
+                current_index=2,
+                decoded_max=52000,
+                target_max=49152,
+            ),
+            1,
+        )
+        self.assertEqual(
+            camera_gphoto2._next_shutter_index_from_measurement(
+                candidates,
+                current_index=1,
+                decoded_max=48000,
+                target_max=49152,
+            ),
+            1,
+        )
+        self.assertEqual(
+            camera_gphoto2._next_shutter_index_from_measurement(
+                candidates,
+                current_index=0,
+                decoded_max=0,
+                target_max=49152,
+            ),
+            3,
+        )
 
 
 if __name__ == "__main__":

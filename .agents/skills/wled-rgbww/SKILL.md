@@ -31,8 +31,8 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 6. Calibrate per-channel WLED gamma before running white-mode or color-mode optimization.
 7. For Canon R6 Mark III sessions, prefer `python3 camera_gphoto2.py capture ...`; the script runs `gphoto2 --auto-detect` because the USB port can change, avoids capture while shutter speed is `bulb`, and uses `--capture-image-and-download` for the initial RAW transfer path.
 8. For RAW decoding, use `python3 camera_gphoto2.py decode ...` or capture with `--decode-linear`; it uses rawpy/LibRaw black/white level handling, demosaics to 16-bit linear camera RGB, and deliberately disables color matrix output, camera/auto white balance, auto-brightening, and gamma correction.
-9. For exposure selection, use `python3 camera_gphoto2.py auto-expose ... --target-max 49152`; it keeps trial captures under the project `tmp/` directory, deletes trial RAW/decoded outputs, and only saves the final accepted capture and decoded outputs.
-10. For color-block location annotation, use `python3 location_picker_ui.py --blocks <count>`; it auto-exposes first, stores temporary capture data under `tmp/location-ui/`, and saves confirmed quadrilateral locations to `config/location/`.
+9. For exposure selection, use `python3 camera_gphoto2.py auto-expose ... --target-max 49152`; it starts from the current bounded shutter speed, computes each next shutter from the decoded linear max ratio, caps temporary trials at `--max-trials` (`5` by default), deletes trial RAW/decoded outputs, and only saves the final accepted capture and decoded outputs.
+10. For color-block location annotation, use `python3 location_picker_ui.py --blocks <count>`; it auto-exposes first with `--max-exposure-trials` defaulting to `3`, stores final capture data under `tmp/location-ui/`, and saves confirmed quadrilateral locations to `config/location/`.
 
 ## Calibration Direction
 
