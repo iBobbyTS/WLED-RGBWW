@@ -316,6 +316,69 @@ Operational notes:
 - Calibrate gamma separately for each physical WLED channel before white-mode or color-mode optimization.
 - All later optimization must operate on gamma-calibrated channel values, not raw PWM values.
 
+## Ray120c Control Path
+
+Use Amaran Desktop's local OpenAPI v2 WebSocket path for Ray120c CCT/G-M reference control:
+
+- WebSocket URL: `ws://127.0.0.1:33782`
+- Node ID: `40165-560387` (`amaran Ray 120c #1`)
+- Action: `set_cct`
+- OpenAPI version: `2`
+- Token: per-request AES-256-GCM token generated from the OpenAPI secret, using `base64(iv + tag + ciphertext(timestamp_seconds))`
+
+The confirmed Ray120c ranges from `get_node_config` are:
+
+- CCT extension enabled: `1800K` to `20000K`
+- Intensity: raw `0..1000`, where `10` is `1%` and `1000` is `100%`
+- G/M: raw `0..200`, where `0` is maximum magenta, `100` is neutral, and `200` is maximum green
+
+The project wrapper is `ray120c.py`. It is importable from Python and also exposes a CLI:
+
+```bash
+python3 ray120c.py set-cct 1800 --intensity-percent 1 --gm 200
+python3 ray120c.py set-cct 1800 --intensity-percent 1 --gm 0
+python3 ray120c.py get-cct
+python3 ray120c.py set-hsl 60 50 --intensity-percent 1
+python3 ray120c.py get-hsl
+python3 ray120c.py set-rgb 12 34 56 --intensity-percent 1
+python3 ray120c.py get-rgb
+python3 ray120c.py node-config
+```
+
+Environment overrides:
+
+- `AMARAN_WS_URL`
+- `AMARAN_NODE_ID`
+- `AMARAN_CLIENT_ID`
+- `AMARAN_OPENAPI_SECRET`
+- `AMARAN_TIMEOUT`
+
+The local wrapper defaults to the public OpenAPI demo secret documented by Sidus/Amaran because that key worked against the local Amaran Desktop v2 server during validation. Override it with `AMARAN_OPENAPI_SECRET` if Amaran Desktop starts requiring a per-user key.
+
+Rejected or limited paths:
+
+- Direct BLE via `wesbos/amaran-BLE-control` can adjust standard CCT/G-M values, but it did not reliably set the extended `1800..2299K` and `10001..20000K` ranges.
+- Amaran Desktop v1 WebSocket `set_cct` can set extended CCT without G/M, but `set_cct` with `gm` returned errors for tested G/M values.
+- v1 `set_hsi` with CCT/G-M-like fields can briefly affect output, but it returns to an HSI/white path and is not a stable CCT+G/M control method.
+
+### HSI/HSL and RGB Validation
+
+Amaran Desktop's OpenAPI names the HSL-like mode `HSI`. The wrapper exposes both `set_hsi`/`get_hsi` and `set_hsl`/`get_hsl` aliases. Validated ranges and scales:
+
+- HSI/HSL: `hue` `0..360`, `sat` `0..100`, raw `intensity` `0..1000`
+- RGB: `r/g/b` `0..255`, optional raw `intensity` `0..1000`
+- CLI `--intensity-percent 1` maps to raw `intensity=10`
+
+Validated acceptance evidence through OpenAPI v2 on the Ray120c:
+
+- `set_hsi(0, 100, intensity_percent=1)`, `set_hsi(120, 100, intensity_percent=1)`, and `set_hsi(240, 100, intensity_percent=1)` each returned `code=0`, then `get_hsi` read back the exact `hue/sat/intensity`.
+- `set_hsi(360, 100, intensity_percent=1)` and `set_hsi(30, 50, intensity_percent=1)` also returned `code=0`, then `get_hsi` read back the exact values.
+- `set_rgb(255, 0, 0, intensity_percent=1)`, `set_rgb(0, 255, 0, intensity_percent=1)`, `set_rgb(0, 0, 255, intensity_percent=1)`, and `set_rgb(128, 64, 32, intensity_percent=1)` each returned `code=0`, then `get_rgb` read back the exact `r/g/b/intensity`.
+- `set_rgb(12, 34, 56)` without an intensity field preserved the current raw `intensity=10` and `get_rgb` read back `r=12,g=34,b=56,intensity=10`.
+- Sequential CLI validation passed for `set-hsl 60 50 --intensity-percent 1` followed by `get-hsl`, and `set-rgb 12 34 56 --intensity-percent 1` followed by `get-rgb`.
+
+Boundary note: `get_node_config` reports `advanced_hsi_support=false`. A `set_hsi` request including optional `cct=1800` and `gm=200` returned `code=0`, but the response and `get_hsi` only contained `hue/sat/intensity`; `get_cct` stayed at the prior CCT/G-M state. Treat HSI/HSL `cct/gm` fields as ignored on this Ray120c and use `set_cct` for CCT+G/M reference control.
+
 ## White Mode Target
 
 The white-mode target is to match the Ray120c at 100% brightness across:
@@ -343,7 +406,7 @@ Reasoning:
 
 - Python environment and package manager: not selected yet.
 - Test runner and validation commands: not selected yet.
-- Ray120c control method: deferred until the first WLED control milestone is complete.
+- Ray120c control method: selected for CCT/G-M reference work via `ray120c.py` using Amaran Desktop OpenAPI v2 on `ws://127.0.0.1:33782`.
 - Color-mode measurement grid: not selected yet.
 - Firmware replacement safety: WLED web OTA is available while WLED can boot, but it is not a brick-recovery path. Confirm whether the physical reset button, WLED-configured `GPIO0` button, and documented `IO33` DIY interface are separate or connected; also confirm whether UART0 `TX/RX` test pads are accessible before flashing custom firmware.
 - Maintainability audit reminder cadence: not configured.

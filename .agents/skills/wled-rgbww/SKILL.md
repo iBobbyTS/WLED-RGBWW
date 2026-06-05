@@ -16,6 +16,7 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 - WLED config reports button 0 on `GPIO0` and IR on `GPIO13`; physically verify this against the reset/restart buttons and documented `IO33` DIY interface before relying on it.
 - Planned optimizer language: Python
 - Reference light: Aputure Amaran Ray120c at 100% brightness
+- Ray120c CCT/G-M control uses Amaran Desktop OpenAPI v2 at `ws://127.0.0.1:33782` with node ID `40165-560387`; use the repo wrapper `ray120c.py` instead of v1 WebSocket or direct BLE for extended CCT work.
 - Camera control path: Canon EOS R6 Mark III over USB PTP using Homebrew `gphoto2 2.5.32` with `libgphoto2 2.5.34`; use `camera_gphoto2.py` for repeatable detection, ISO/aperture/shutter writes, RAW `.cr3` capture, and immediate download.
 - Measurement basis: the selected camera under the documented capture policy
 - Calibration scene: black card, white card, 18% gray card, 24-color chart, WLED output, and Ray120c output
@@ -34,6 +35,11 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 
 - White mode should match Ray120c 100% brightness across `1800K` to `20000K` CCT and `-1.0` to `+1.0` G/M offset.
 - Ray120c is only the 100% brightness calibration reference for the WLED strip.
+- For Ray120c OpenAPI v2 `set_cct`, use raw `intensity` `0..1000` (`10` is `1%`) and raw `gm` `0..200` (`0` max magenta, `100` neutral, `200` max green). The v2 request requires a fresh AES-256-GCM token per request.
+- For Ray120c HSL-like color work, use OpenAPI v2 `set_hsi` / `get_hsi`; the repo wrapper exposes both `set_hsi` and `set_hsl` aliases. Validated low-intensity cases read back exact `hue/sat/intensity` for hues `0`, `120`, `240`, `360`, plus `hue=30,sat=50`.
+- For Ray120c RGB color work, use OpenAPI v2 `set_rgb` / `get_rgb`; validated low-intensity red/green/blue and mixed RGB values read back exact `r/g/b/intensity`. If `set_rgb` omits intensity, the current intensity is preserved.
+- `get_node_config` reports `advanced_hsi_support=false`; `cct/gm` fields sent with `set_hsi` are ignored on this Ray120c, so use `set_cct` for CCT+G/M control.
+- Direct BLE and Amaran Desktop v1 WebSocket paths are not the calibration control path: direct BLE did not reliably set extended CCT ranges, v1 `set_cct` with `gm` returned errors, and v1 `set_hsi` was not stable for CCT+G/M.
 - All optimizer logic should operate on gamma-calibrated channel values, not raw PWM values.
 - Stock WLED control for the five-channel RGBCCT bus is RGB + W + CCT. It does not directly expose separate JSON fields for arbitrary independent WW/CW values.
 - With current CCT blend `cb=0`, map desired `[R,G,B,WW,CW]` to stock WLED as `W=WW+CW` and `CCT=round(255*CW/(WW+CW))` when `WW+CW <= 255`.
