@@ -307,22 +307,22 @@ The auto-exposure routine keeps ISO and aperture fixed, starts from the current 
 For interactive color-block location picking, use:
 
 ```bash
-python3 location_picker_ui.py --blocks 24
+python3 location_picker_ui.py --blocks 24 --rows 4 --cols 6
 ```
 
-On startup the UI runs the same bounded auto-exposure path, saves the final capture and decoded `.npy` under `tmp/location-ui/<timestamp>/camera` and `tmp/location-ui/<timestamp>/decoded`, then displays the decoded preview. Trial captures are deleted by the auto-exposure function before the UI loads. The UI defaults to `--max-exposure-trials 3` because the location picker only needs a usable preview; raise it if a tighter exposure is needed. Use the mouse wheel to zoom, right-button or middle-button drag to pan, and left-button drag to create a rectangle. Existing quadrilaterals can be edited by dragging inside the shape to move it, dragging an edge to move that side, or dragging a corner handle to make an irregular quadrilateral. The confirm button is enabled only when the entered block count equals the number of quadrilaterals. Confirming writes a JSON configuration to `config/location/`.
+On startup the UI runs the same bounded auto-exposure path, saves the final capture and decoded `.npy` under `tmp/location-ui/<timestamp>/camera` and `tmp/location-ui/<timestamp>/decoded`, then displays the decoded preview. Trial captures are deleted by the auto-exposure function before the UI loads. The UI defaults to `--max-exposure-trials 3` because the location picker only needs a usable preview; raise it if a tighter exposure is needed. The `Auto Detect` button uses the entered row and column count to detect color-block quadrilaterals. For 4x6 charts, `opencv-contrib-python-headless` enables OpenCV's dedicated `mcc` Macbeth 24 ColorChecker detector and returns the patch quadrilaterals directly. If `mcc` is unavailable or fails, the UI falls back to OpenCV Canny/Hough grid-angle detection, then to the conservative projection detector. Fallback-detected blocks are inset by default so they stay inside color patches and do not include the black frame or grid lines. Use the mouse wheel to zoom, right-button or middle-button drag to pan, and left-button drag to create a rectangle. Existing quadrilaterals can be edited by dragging inside the shape to move it, dragging an edge to move that side, or dragging a corner handle to make an irregular quadrilateral. The confirm button is enabled only when the entered block count equals the number of quadrilaterals. Confirming writes a JSON configuration to `config/location/`.
 
-Optional Python dependencies for decoding:
+Optional Python dependencies for decoding and automatic location detection:
 
 ```bash
-python3 -m pip install rawpy numpy tifffile
+python3 -m pip install rawpy numpy tifffile opencv-contrib-python-headless
 ```
 
 For the repository-local `.venv`, bootstrap pip first if needed, then install the same dependencies:
 
 ```bash
 .venv/bin/python3 -m ensurepip --upgrade
-.venv/bin/python3 -m pip install --upgrade pip rawpy numpy tifffile
+.venv/bin/python3 -m pip install --upgrade pip rawpy numpy tifffile opencv-contrib-python-headless
 ```
 
 Detection and inspection commands:
