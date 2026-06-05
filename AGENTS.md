@@ -17,6 +17,7 @@
 - Treat Python as the planned implementation language for optimizer and calibration tooling.
 - No package manager, virtual environment, or test runner has been selected yet. When one is introduced, document the exact commands in `docs/README.md`.
 - Prefer local execution. Use Docker only when a concrete dependency requires it; if Docker is needed, use Colima and prefer `docker-compose`.
+- Put all temporary data, probe outputs, decoded images, scratch virtual environments, and other disposable artifacts under this repository's `tmp/` directory. Do not write project temporary data to the system `/tmp`.
 
 ## Documentation
 

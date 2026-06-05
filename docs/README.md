@@ -254,6 +254,61 @@ python3 camera_gphoto2.py capture \
   --image-format RAW
 ```
 
+The same wrapper can decode a captured CR3 into a linear 16-bit camera-RGB image for calibration:
+
+```bash
+python3 camera_gphoto2.py decode captures/camera/example.cr3 \
+  --output-dir captures/decoded \
+  --format npy \
+  --format tiff
+```
+
+The decode path uses `rawpy`/LibRaw with:
+
+- `output_color=rawpy.ColorSpace.raw`
+- `use_camera_wb=False`
+- `use_auto_wb=False`
+- `user_wb=[1, 1, 1, 1]`
+- `no_auto_bright=True`
+- `gamma=(1, 1)`
+- `output_bps=16`
+
+This intentionally keeps the result in linear camera RAW RGB space. LibRaw handles the RAW black/white level correction before demosaicing; the project should not apply a second manual black-level subtraction to this decoded output. The command writes `.npy`, optional 16-bit `.tiff`, and a `.json` sidecar containing LibRaw sizes, black/white level metadata, and output statistics.
+
+To capture and decode in one call:
+
+```bash
+python3 camera_gphoto2.py capture \
+  --output-dir captures/camera \
+  --iso 100 \
+  --aperture 4 \
+  --shutter-speed 1/30 \
+  --image-format RAW \
+  --decode-linear \
+  --decode-output-dir captures/decoded
+```
+
+To automatically find an exposure whose decoded linear image max stays at or below `49152`, use:
+
+```bash
+python3 camera_gphoto2.py auto-expose \
+  --output-dir captures/camera \
+  --decode-output-dir captures/decoded \
+  --target-max 49152 \
+  --iso 100 \
+  --aperture 4 \
+  --min-shutter-speed 1/8000 \
+  --max-shutter-speed 30
+```
+
+The auto-exposure routine keeps ISO and aperture fixed, searches bounded shutter-speed candidates, decodes each trial with the same linear camera-RGB path, and chooses the longest shutter speed whose decoded max is within the target. Trial RAW and decoded files are written only under a temporary directory inside the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are the only files saved to the requested output directories.
+
+Optional Python dependencies for decoding:
+
+```bash
+python3 -m pip install rawpy numpy tifffile
+```
+
 Detection and inspection commands:
 
 ```bash

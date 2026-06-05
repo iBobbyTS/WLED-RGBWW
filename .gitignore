@@ -5,3 +5,4 @@ __pycache__/
 firmware/esphome/build/
 firmware/esphome/.esphome/
 firmware/esphome/secrets.yaml
+tmp/

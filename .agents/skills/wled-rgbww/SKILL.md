@@ -30,6 +30,8 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 5. For optimizer work, follow the documented camera policy: ISO 100, aperture two stops down from maximum, automatic shutter targeting white at about 80% full-well capacity, and fixed white balance/focus/image processing.
 6. Calibrate per-channel WLED gamma before running white-mode or color-mode optimization.
 7. For Canon R6 Mark III sessions, prefer `python3 camera_gphoto2.py capture ...`; the script runs `gphoto2 --auto-detect` because the USB port can change, avoids capture while shutter speed is `bulb`, and uses `--capture-image-and-download` for the initial RAW transfer path.
+8. For RAW decoding, use `python3 camera_gphoto2.py decode ...` or capture with `--decode-linear`; it uses rawpy/LibRaw black/white level handling, demosaics to 16-bit linear camera RGB, and deliberately disables color matrix output, camera/auto white balance, auto-brightening, and gamma correction.
+9. For exposure selection, use `python3 camera_gphoto2.py auto-expose ... --target-max 49152`; it keeps trial captures under the project `tmp/` directory, deletes trial RAW/decoded outputs, and only saves the final accepted capture and decoded outputs.
 
 ## Calibration Direction
 
