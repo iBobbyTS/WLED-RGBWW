@@ -303,10 +303,25 @@ python3 camera_gphoto2.py auto-expose \
 
 The auto-exposure routine keeps ISO and aperture fixed, searches bounded shutter-speed candidates, decodes each trial with the same linear camera-RGB path, and chooses the longest shutter speed whose decoded max is within the target. Trial RAW and decoded files are written only under a temporary directory inside the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are the only files saved to the requested output directories.
 
+For interactive color-block location picking, use:
+
+```bash
+python3 location_picker_ui.py --blocks 24
+```
+
+On startup the UI runs the same auto-exposure path, saves the temporary capture and decoded `.npy` under `tmp/location-ui/`, then displays the decoded preview. Use the mouse wheel to zoom, right-button or middle-button drag to pan, and left-button drag to create a rectangle. Existing quadrilaterals can be edited by dragging inside the shape to move it, dragging an edge to move that side, or dragging a corner handle to make an irregular quadrilateral. The confirm button is enabled only when the entered block count equals the number of quadrilaterals. Confirming writes a JSON configuration to `config/location/`.
+
 Optional Python dependencies for decoding:
 
 ```bash
 python3 -m pip install rawpy numpy tifffile
+```
+
+For the repository-local `.venv`, bootstrap pip first if needed, then install the same dependencies:
+
+```bash
+.venv/bin/python3 -m ensurepip --upgrade
+.venv/bin/python3 -m pip install --upgrade pip rawpy numpy tifffile
 ```
 
 Detection and inspection commands:
