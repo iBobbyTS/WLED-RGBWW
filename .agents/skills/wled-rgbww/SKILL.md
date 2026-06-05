@@ -16,6 +16,7 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 - WLED config reports button 0 on `GPIO0` and IR on `GPIO13`; physically verify this against the reset/restart buttons and documented `IO33` DIY interface before relying on it.
 - Planned optimizer language: Python
 - Reference light: Aputure Amaran Ray120c at 100% brightness
+- Camera control path: Canon EOS R6 Mark III over USB PTP using Homebrew `gphoto2 2.5.32` with `libgphoto2 2.5.34`; use `camera_gphoto2.py` for repeatable detection, ISO/aperture/shutter writes, RAW `.cr3` capture, and immediate download.
 - Measurement basis: the selected camera under the documented capture policy
 - Calibration scene: black card, white card, 18% gray card, 24-color chart, WLED output, and Ray120c output
 
@@ -27,6 +28,7 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 4. Record confirmed channel order and WLED payload behavior in `docs/README.md`.
 5. For optimizer work, follow the documented camera policy: ISO 100, aperture two stops down from maximum, automatic shutter targeting white at about 80% full-well capacity, and fixed white balance/focus/image processing.
 6. Calibrate per-channel WLED gamma before running white-mode or color-mode optimization.
+7. For Canon R6 Mark III sessions, prefer `python3 camera_gphoto2.py capture ...`; the script runs `gphoto2 --auto-detect` because the USB port can change, avoids capture while shutter speed is `bulb`, and uses `--capture-image-and-download` for the initial RAW transfer path.
 
 ## Calibration Direction
 

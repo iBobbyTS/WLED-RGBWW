@@ -228,6 +228,88 @@ Camera capture policy:
 - Use the 24-color chart to estimate camera-to-working-space correction and to detect unstable lighting or nonlinear camera behavior.
 - Keep ambient light controlled and repeatable.
 
+### Canon EOS R6 Mark III gphoto2 Probe
+
+Use `gphoto2` as the first camera-control path for the Canon EOS R6 Mark III calibration workflow.
+
+Validated local setup on 2026-06-05:
+
+- Host tool: Homebrew `gphoto2 2.5.32`
+- Camera library: `libgphoto2 2.5.34`
+- Detected camera: `Canon EOS R6 Mark III`
+- Observed USB port during the probe: `usb:001,010`
+- Camera firmware/device version reported by gphoto2: `3-1.0.2`
+- Lens reported during the probe: `RF35mm F1.8 MACRO IS STM`
+- Storage reported during the probe: CFexpress and SD cards both visible
+
+The project wrapper is `camera_gphoto2.py`. It auto-detects the camera port, sets bounded exposure parameters, verifies the shutter is not `bulb`, triggers capture, and reports the downloaded RAW path as JSON:
+
+```bash
+python3 camera_gphoto2.py detect
+python3 camera_gphoto2.py capture \
+  --output-dir captures/camera \
+  --iso 100 \
+  --aperture 4 \
+  --shutter-speed 1/30 \
+  --image-format RAW
+```
+
+Detection and inspection commands:
+
+```bash
+gphoto2 --version
+gphoto2 --auto-detect
+gphoto2 --port usb:001,010 --summary
+gphoto2 --port usb:001,010 --list-config
+gphoto2 --port usb:001,010 \
+  --get-config /main/imgsettings/iso \
+  --get-config /main/capturesettings/aperture \
+  --get-config /main/capturesettings/shutterspeed \
+  --get-config /main/imgsettings/imageformat
+```
+
+Confirmed writable controls:
+
+- ISO: `/main/imgsettings/iso`; validated at `100`
+- Aperture: `/main/capturesettings/aperture`; validated at `4`
+- Shutter speed: `/main/capturesettings/shutterspeed`; validated by changing from `bulb` to `1/30`
+- Image format: `/main/imgsettings/imageformat`; current validated setting was `RAW`
+
+Safe bounded capture smoke test:
+
+```bash
+mkdir -p /tmp/wled-rgbww-gphoto2-probe
+gphoto2 --port usb:001,010 \
+  --set-config /main/imgsettings/iso=100 \
+  --set-config /main/capturesettings/aperture=4 \
+  --set-config /main/capturesettings/shutterspeed=1/30 \
+  --capture-image-and-download \
+  --filename /tmp/wled-rgbww-gphoto2-probe/%Y%m%d-%H%M%S.%C
+```
+
+The smoke test downloaded `/tmp/wled-rgbww-gphoto2-probe/20260605-134136.cr3` and removed the temporary `/capt0001.cr3` from the camera. `exiftool` confirmed:
+
+- Model: `Canon EOS R6 Mark III`
+- File type: `CR3`
+- Image size: `6960 x 4640`
+- ISO: `100`
+- Shutter speed: `1/30`
+- Aperture/F-number: `4.0`
+
+Silent/electronic shutter follow-up:
+
+- After enabling silent shutter on the camera, `gphoto2 --capture-image-and-download` still succeeded.
+- Downloaded file: `/tmp/wled-rgbww-gphoto2-probe/20260605-134503-silent.cr3`
+- File size: about `19 MB`
+- `exiftool` confirmed `ShutterMode: Electronic`, `DriveMode: Single-frame Shooting`, `ISO 100`, `1/30`, and `f/4.0`.
+
+Operational notes:
+
+- The port identifier can change after reconnecting; run `gphoto2 --auto-detect` before scripted sessions.
+- Avoid triggering capture while shutter speed reads `bulb`; first set a bounded shutter speed.
+- The command above uses gphoto2's capture-and-download flow and deletes the temporary camera-side file after transfer. If card retention is needed, add `--keep` deliberately.
+- For optimizer automation, use `camera_gphoto2.py` first. It wraps gphoto2 via subprocess for reproducibility; consider Python libgphoto bindings only if subprocess overhead becomes a measured problem.
+
 ## Calibration Baselines
 
 - The Ray120c is only the 100% brightness reference for calibrating the WLED strip.
