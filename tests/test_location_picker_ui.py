@@ -1,4 +1,5 @@
 import tempfile
+import tkinter as tk
 import unittest
 from pathlib import Path
 
@@ -42,6 +43,27 @@ class LocationPreviewTests(unittest.TestCase):
         self.assertEqual(resized[0, 2, 0], 2)
         self.assertEqual(resized[2, 0, 0], 3)
         self.assertEqual(resized[2, 2, 0], 4)
+
+    def test_ppm_photo_data_loads_in_tk(self):
+        image = np.array(
+            [
+                [[255, 0, 0], [0, 255, 0]],
+                [[0, 0, 255], [255, 255, 255]],
+            ],
+            dtype=np.uint8,
+        )
+
+        data = location_picker_ui.rgb_to_ppm_photo_data(image)
+
+        self.assertTrue(data.startswith(b"P6\n2 2\n255\n"))
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            photo = tk.PhotoImage(data=data, format="PPM")
+            self.assertEqual(photo.width(), 2)
+            self.assertEqual(photo.height(), 2)
+        finally:
+            root.destroy()
 
 
 class LocationGeometryTests(unittest.TestCase):

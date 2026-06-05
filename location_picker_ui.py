@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import math
 import threading
@@ -70,10 +69,10 @@ def resize_nearest_rgb(image: Any, scale: float) -> Any:
     return image[row_index[:, None], col_index[None, :]]
 
 
-def rgb_to_ppm_photo_data(image: Any) -> str:
+def rgb_to_ppm_photo_data(image: Any) -> bytes:
     height, width = image.shape[:2]
     header = f"P6\n{width} {height}\n255\n".encode("ascii")
-    return base64.b64encode(header + image.tobytes()).decode("ascii")
+    return header + image.tobytes()
 
 
 def point_in_polygon(point: Point, polygon: list[Point]) -> bool:
