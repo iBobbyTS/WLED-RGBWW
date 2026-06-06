@@ -96,13 +96,13 @@ output:
     zero_means_zero: true
   - platform: ledc
     id: pwm_warm_white
-    pin: GPIO16
+    pin: GPIO4
     channel: 6
     frequency: ${pwm_frequency}
     zero_means_zero: true
   - platform: ledc
     id: pwm_cold_white
-    pin: GPIO4
+    pin: GPIO16
     channel: 8
     frequency: ${pwm_frequency}
     zero_means_zero: true
