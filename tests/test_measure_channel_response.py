@@ -91,7 +91,7 @@ class MeasureChannelResponseParseTests(unittest.TestCase):
         args = measure_channel_response.parse_args([])
 
         self.assertEqual(args.codes[0], 4095)
-        self.assertEqual(args.codes[-1], 1)
+        self.assertEqual(args.codes[-1], 8)
 
 
 class MeasureChannelResponseRegionTests(unittest.TestCase):

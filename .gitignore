@@ -7,3 +7,4 @@ firmware/esphome/.esphome/
 firmware/esphome/secrets.yaml
 tmp/
 config/
+test.py  # 人工编写的测试代码。

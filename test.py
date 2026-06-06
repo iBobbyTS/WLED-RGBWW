@@ -2,5 +2,5 @@
 
 from esphome import light
 
-# light(4095, 4095, 4095, 4095, 4095)
+light(0, 4095, 0, 0, 0)
 # light(0, 0, 0, 0, 0)

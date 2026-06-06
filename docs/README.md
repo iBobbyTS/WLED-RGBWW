@@ -323,7 +323,7 @@ Use `measure_channel_response.py` to measure the WLED strip's per-channel code/d
 
 The script turns on one channel at a time, runs the existing bounded auto-exposure capture for each code, decodes the RAW image to `.npy`, computes region statistics, normalizes signal by shutter seconds, and writes an incremental JSON report under `tmp/channel-response/`. It starts and ends with `all_off`. By default it first captures an all-off ambient frame at fixed `ISO 100`, `30s`, the configured aperture, and RAW format, then subtracts that normalized ambient signal from each measurement. The CLI meters auto exposure from the saved 24-patch chart config at `config/location/locations-20260605-225800.json` instead of the full frame.
 
-Default code order is high to low, starting at `4095`. Each channel is measured downward until the final auto-exposed capture is already at the longest shutter and the ambient-subtracted per-second signal is at or below `--ambient-stop-threshold-per-second` (`2.0` by default). At that point lower codes for that channel are skipped and recorded in `skipped_measurements`.
+Default code order is high to low, starting at `4095` and ending at `8`; codes `6, 4, 3, 2, 1` are skipped because they are visually off on the current fixture. Each channel is measured downward until the final auto-exposed capture is already at the longest shutter and the ambient-subtracted per-second signal is at or below `--ambient-stop-threshold-per-second` (`2.0` by default). At that point lower codes for that channel are skipped and recorded in `skipped_measurements`.
 
 First inspect the planned sweep without touching hardware:
 

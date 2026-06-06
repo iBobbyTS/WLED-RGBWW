@@ -37,11 +37,6 @@ DEFAULT_CODE_VALUES = (
     16,
     12,
     8,
-    6,
-    4,
-    3,
-    2,
-    1,
 )
 DEFAULT_CHANNELS = ("cw", "ww", "r", "g", "b")
 DEFAULT_SAFE_CODE_LIMIT = 1024
