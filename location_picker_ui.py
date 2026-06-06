@@ -32,6 +32,37 @@ DEFAULT_MAX_SHUTTER_SPEED = "30"
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 8765
 DEFAULT_AUTO_DETECT_INSET_RATIO = 0.08
+COLORCHECKER_CLASSIC_ROWS = 4
+COLORCHECKER_CLASSIC_COLS = 6
+COLORCHECKER_CLASSIC_COUNT = COLORCHECKER_CLASSIC_ROWS * COLORCHECKER_CLASSIC_COLS
+SUPPORTED_COLORCHECKER_ORIENTATIONS = (0, 180)
+
+COLORCHECKER_CLASSIC_24_PATCHES = (
+    {"standard_index": 1, "name": "dark_skin", "label": "Skin D", "roles": ["skin", "memory_color"]},
+    {"standard_index": 2, "name": "light_skin", "label": "Skin L", "roles": ["skin", "memory_color"]},
+    {"standard_index": 3, "name": "blue_sky", "label": "Sky", "roles": ["memory_color"]},
+    {"standard_index": 4, "name": "foliage", "label": "Foliage", "roles": ["memory_color"]},
+    {"standard_index": 5, "name": "blue_flower", "label": "Flower", "roles": ["memory_color"]},
+    {"standard_index": 6, "name": "bluish_green", "label": "BG", "roles": ["color"]},
+    {"standard_index": 7, "name": "orange", "label": "Orange", "roles": ["color"]},
+    {"standard_index": 8, "name": "purplish_blue", "label": "PB", "roles": ["color"]},
+    {"standard_index": 9, "name": "moderate_red", "label": "MR", "roles": ["color"]},
+    {"standard_index": 10, "name": "purple", "label": "Purple", "roles": ["color"]},
+    {"standard_index": 11, "name": "yellow_green", "label": "YG", "roles": ["color"]},
+    {"standard_index": 12, "name": "orange_yellow", "label": "OY", "roles": ["color"]},
+    {"standard_index": 13, "name": "blue", "label": "B", "roles": ["rgbcmy", "hue_anchor", "blue"]},
+    {"standard_index": 14, "name": "green", "label": "G", "roles": ["rgbcmy", "hue_anchor", "green"]},
+    {"standard_index": 15, "name": "red", "label": "R", "roles": ["rgbcmy", "hue_anchor", "red"]},
+    {"standard_index": 16, "name": "yellow", "label": "Y", "roles": ["rgbcmy", "hue_anchor", "yellow"]},
+    {"standard_index": 17, "name": "magenta", "label": "M", "roles": ["rgbcmy", "hue_anchor", "magenta"]},
+    {"standard_index": 18, "name": "cyan", "label": "C", "roles": ["rgbcmy", "hue_anchor", "cyan"]},
+    {"standard_index": 19, "name": "white", "label": "W", "roles": ["neutral", "white", "exposure"]},
+    {"standard_index": 20, "name": "neutral_8", "label": "N8", "roles": ["neutral", "gray"]},
+    {"standard_index": 21, "name": "neutral_6_5", "label": "N6.5", "roles": ["neutral", "gray"]},
+    {"standard_index": 22, "name": "neutral_5", "label": "N5", "roles": ["neutral", "gray"]},
+    {"standard_index": 23, "name": "neutral_3_5", "label": "N3.5", "roles": ["neutral", "gray"]},
+    {"standard_index": 24, "name": "black", "label": "K", "roles": ["neutral", "black", "ambient_check"]},
+)
 
 Point = tuple[float, float]
 Quad = list[Point]
@@ -905,6 +936,49 @@ def quad_to_json(quad: Quad) -> list[dict[str, float]]:
     return [{"x": round(float(x), 3), "y": round(float(y), 3)} for x, y in quad]
 
 
+def colorchecker_standard_index(*, block_index: int, orientation_degrees: int) -> int:
+    if not 1 <= block_index <= COLORCHECKER_CLASSIC_COUNT:
+        raise ValueError("block_index must be in 1..24")
+    if orientation_degrees == 0:
+        return block_index
+    if orientation_degrees == 180:
+        return COLORCHECKER_CLASSIC_COUNT + 1 - block_index
+    raise ValueError("only 0 and 180 degree ColorChecker orientations are supported")
+
+
+def colorchecker_patch_metadata(*, block_index: int, orientation_degrees: int) -> dict[str, Any]:
+    standard_index = colorchecker_standard_index(
+        block_index=block_index,
+        orientation_degrees=orientation_degrees,
+    )
+    patch = dict(COLORCHECKER_CLASSIC_24_PATCHES[standard_index - 1])
+    patch["block_index"] = block_index
+    return patch
+
+
+def build_colorchecker_chart_metadata(
+    *,
+    rows: int,
+    cols: int,
+    block_count: int,
+    orientation_degrees: int,
+) -> dict[str, Any] | None:
+    if rows != COLORCHECKER_CLASSIC_ROWS or cols != COLORCHECKER_CLASSIC_COLS:
+        return None
+    if block_count != COLORCHECKER_CLASSIC_COUNT:
+        return None
+    if orientation_degrees not in SUPPORTED_COLORCHECKER_ORIENTATIONS:
+        raise ValueError("only 0 and 180 degree ColorChecker orientations are supported")
+    return {
+        "type": "colorchecker_classic_24",
+        "rows": rows,
+        "cols": cols,
+        "detected_order": "image_row_major",
+        "orientation_degrees": orientation_degrees,
+        "standard_index_formula": "block_index" if orientation_degrees == 0 else "25 - block_index",
+    }
+
+
 def build_location_config(
     *,
     target_block_count: int,
@@ -912,11 +986,24 @@ def build_location_config(
     image_height: int,
     quads: list[Quad],
     capture: camera_gphoto2.CaptureResult | None,
+    rows: int | None = None,
+    cols: int | None = None,
+    chart_orientation_degrees: int = 0,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     if target_block_count != len(quads):
         raise ValueError("target_block_count must match the number of quadrilaterals")
-    return {
+    chart = (
+        build_colorchecker_chart_metadata(
+            rows=rows,
+            cols=cols,
+            block_count=target_block_count,
+            orientation_degrees=chart_orientation_degrees,
+        )
+        if rows is not None and cols is not None
+        else None
+    )
+    config = {
         "version": 1,
         "created_at": created_at or datetime.now(timezone.utc).isoformat(),
         "target_block_count": target_block_count,
@@ -929,10 +1016,18 @@ def build_location_config(
             {
                 "index": index + 1,
                 "points": quad_to_json(quad),
+                **(
+                    {"patch": colorchecker_patch_metadata(block_index=index + 1, orientation_degrees=chart_orientation_degrees)}
+                    if chart is not None
+                    else {}
+                ),
             }
             for index, quad in enumerate(quads)
         ],
     }
+    if chart is not None:
+        config["chart"] = chart
+    return config
 
 
 def save_location_config(config: dict[str, Any], *, output_dir: Path | None = None) -> Path:
@@ -979,6 +1074,10 @@ class LocationPickerState:
     error: str | None = None
     saved_path: str | None = None
     loading: bool = False
+    auto_detect_quads: list[Quad] | None = None
+    auto_detect_error: str | None = None
+    auto_detect_rows: int | None = None
+    auto_detect_cols: int | None = None
 
     def start_auto_exposure(self) -> bool:
         with self.lock:
@@ -992,6 +1091,10 @@ class LocationPickerState:
             self.status = "正在自动曝光..."
             self.error = None
             self.loading = True
+            self.auto_detect_quads = None
+            self.auto_detect_error = None
+            self.auto_detect_rows = None
+            self.auto_detect_cols = None
         thread = threading.Thread(target=self._auto_exposure_worker, daemon=True)
         thread.start()
         return True
@@ -1024,22 +1127,45 @@ class LocationPickerState:
                 self.loading = False
             return
 
+        auto_detect_quads: list[Quad] | None = None
+        auto_detect_error: str | None = None
+        try:
+            auto_detect_quads = detect_color_checker_quads(preview, rows=self.args.rows, cols=self.args.cols)
+        except Exception as exc:
+            auto_detect_error = str(exc)
+
         image_height, image_width = preview.shape[:2]
         image_max = result.final_capture.decoded.to_jsonable().get("image_max") if result.final_capture.decoded else None
         shutter = result.final_capture.settings.shutter_speed
+        status = f"已加载: {image_width}x{image_height}, shutter={shutter}, max={image_max}"
+        if auto_detect_quads is not None:
+            status = f"{status}; 已自动识别 {self.args.rows}x{self.args.cols} 色块"
+        elif auto_detect_error is not None:
+            status = f"{status}; 自动识别失败: {auto_detect_error}"
         with self.lock:
             self.capture_result = result
             self.preview_image = preview
             self.preview_png = rgb_to_png_data(preview)
             self.image_width = int(image_width)
             self.image_height = int(image_height)
-            self.status = f"已加载: {image_width}x{image_height}, shutter={shutter}, max={image_max}"
+            self.status = status
             self.error = None
             self.loading = False
+            self.auto_detect_quads = auto_detect_quads
+            self.auto_detect_error = auto_detect_error
+            self.auto_detect_rows = self.args.rows
+            self.auto_detect_cols = self.args.cols
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             capture = self.capture_result.to_jsonable() if self.capture_result is not None else None
+            auto_detect = {
+                "rows": self.auto_detect_rows,
+                "cols": self.auto_detect_cols,
+                "target_block_count": len(self.auto_detect_quads) if self.auto_detect_quads is not None else None,
+                "quads": _quads_to_jsonable(self.auto_detect_quads) if self.auto_detect_quads is not None else None,
+                "error": self.auto_detect_error,
+            }
             return {
                 "status": self.status,
                 "error": self.error,
@@ -1047,6 +1173,7 @@ class LocationPickerState:
                 "loading": self.loading,
                 "has_image": self.preview_png is not None,
                 "retry_available": not self.loading and self.preview_png is None,
+                "auto_detect": auto_detect,
                 "image": {
                     "width": self.image_width,
                     "height": self.image_height,
@@ -1055,6 +1182,7 @@ class LocationPickerState:
                     "blocks": self.args.blocks,
                     "rows": self.args.rows,
                     "cols": self.args.cols,
+                    "chart_orientation_degrees": self.args.chart_orientation,
                 },
                 "capture": capture,
             }
@@ -1070,13 +1198,25 @@ class LocationPickerState:
         quads = detect_color_checker_quads(image, rows=rows, cols=cols)
         with self.lock:
             self.status = f"已自动识别 {rows}x{cols} 色块"
+            self.auto_detect_quads = quads
+            self.auto_detect_error = None
+            self.auto_detect_rows = rows
+            self.auto_detect_cols = cols
         return {
             "status": f"已自动识别 {rows}x{cols} 色块",
             "target_block_count": rows * cols,
             "quads": _quads_to_jsonable(quads),
         }
 
-    def save_quads(self, *, target_block_count: int, quads_payload: Any) -> dict[str, Any]:
+    def save_quads(
+        self,
+        *,
+        target_block_count: int,
+        quads_payload: Any,
+        rows: int | None = None,
+        cols: int | None = None,
+        chart_orientation_degrees: int | None = None,
+    ) -> dict[str, Any]:
         with self.lock:
             capture = self.capture_result.final_capture if self.capture_result is not None else None
             image_width = self.image_width
@@ -1085,12 +1225,22 @@ class LocationPickerState:
             raise RuntimeError("preview image is not ready")
 
         quads = parse_quads_payload(quads_payload, width=image_width, height=image_height)
+        rows = rows if rows is not None else self.args.rows
+        cols = cols if cols is not None else self.args.cols
+        chart_orientation_degrees = (
+            chart_orientation_degrees
+            if chart_orientation_degrees is not None
+            else self.args.chart_orientation
+        )
         config = build_location_config(
             target_block_count=target_block_count,
             image_width=image_width,
             image_height=image_height,
             quads=quads,
             capture=capture,
+            rows=rows,
+            cols=cols,
+            chart_orientation_degrees=chart_orientation_degrees,
         )
         path = save_location_config(config)
         with self.lock:
@@ -1181,6 +1331,9 @@ def make_location_picker_handler(state: LocationPickerState) -> type[BaseHTTPReq
                     response = state.save_quads(
                         target_block_count=_required_int(payload, "target_block_count"),
                         quads_payload=payload.get("quads"),
+                        rows=_optional_int(payload, "rows"),
+                        cols=_optional_int(payload, "cols"),
+                        chart_orientation_degrees=_optional_int(payload, "chart_orientation_degrees"),
                     )
                 else:
                     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -1239,6 +1392,15 @@ def make_location_picker_handler(state: LocationPickerState) -> type[BaseHTTPReq
 def _required_int(payload: dict[str, Any], name: str) -> int:
     if name not in payload:
         raise ValueError(f"{name} is required")
+    try:
+        return int(payload[name])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _optional_int(payload: dict[str, Any], name: str) -> int | None:
+    if name not in payload or payload[name] is None:
+        return None
     try:
         return int(payload[name])
     except (TypeError, ValueError) as exc:
@@ -1361,6 +1523,7 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       <label>列 <input id="cols" class="small" type="number" min="1" max="100" value="6"></label>
       <button id="retry">重试相机</button>
       <button id="detect">自动识别</button>
+      <button id="rotateChart" title="切换标准24色色卡标注方向">色卡 0°</button>
       <button id="fit">适配窗口</button>
       <button id="delete" class="danger">删除选中</button>
       <button id="clear" class="danger">清空</button>
@@ -1389,6 +1552,7 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
     const colsInput = document.getElementById("cols");
     const retryButton = document.getElementById("retry");
     const detectButton = document.getElementById("detect");
+    const rotateChartButton = document.getElementById("rotateChart");
     const fitButton = document.getElementById("fit");
     const deleteButton = document.getElementById("delete");
     const clearButton = document.getElementById("clear");
@@ -1411,8 +1575,36 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       createPreview: null,
       fittedOnce: false,
       loading: false,
-      retryAvailable: false
+      retryAvailable: false,
+      chartOrientationDegrees: 0
     };
+
+    const COLORCHECKER_CLASSIC_24 = [
+      { index: 1, name: "dark_skin", label: "Skin D" },
+      { index: 2, name: "light_skin", label: "Skin L" },
+      { index: 3, name: "blue_sky", label: "Sky" },
+      { index: 4, name: "foliage", label: "Foliage" },
+      { index: 5, name: "blue_flower", label: "Flower" },
+      { index: 6, name: "bluish_green", label: "BG" },
+      { index: 7, name: "orange", label: "Orange" },
+      { index: 8, name: "purplish_blue", label: "PB" },
+      { index: 9, name: "moderate_red", label: "MR" },
+      { index: 10, name: "purple", label: "Purple" },
+      { index: 11, name: "yellow_green", label: "YG" },
+      { index: 12, name: "orange_yellow", label: "OY" },
+      { index: 13, name: "blue", label: "B" },
+      { index: 14, name: "green", label: "G" },
+      { index: 15, name: "red", label: "R" },
+      { index: 16, name: "yellow", label: "Y" },
+      { index: 17, name: "magenta", label: "M" },
+      { index: 18, name: "cyan", label: "C" },
+      { index: 19, name: "white", label: "W" },
+      { index: 20, name: "neutral_8", label: "N8" },
+      { index: 21, name: "neutral_6_5", label: "N6.5" },
+      { index: 22, name: "neutral_5", label: "N5" },
+      { index: 23, name: "neutral_3_5", label: "N3.5" },
+      { index: 24, name: "black", label: "K" }
+    ];
 
     function resizeCanvas() {
       const rect = canvas.getBoundingClientRect();
@@ -1434,6 +1626,9 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       blocksInput.value = data.defaults.blocks;
       rowsInput.value = data.defaults.rows;
       colsInput.value = data.defaults.cols;
+      state.chartOrientationDegrees = Number.isFinite(data.defaults.chart_orientation_degrees)
+        ? data.defaults.chart_orientation_degrees
+        : 0;
       state.loading = Boolean(data.loading);
       state.retryAvailable = Boolean(data.retry_available);
       updateStatus(data.status, data.error);
@@ -1442,6 +1637,7 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
         state.imageWidth = data.image.width;
         state.imageHeight = data.image.height;
         await loadPreview();
+        applyInitialAutoDetect(data.auto_detect);
       }
       updateControls();
       if (!state.hasImage && data.loading) {
@@ -1458,6 +1654,18 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       state.hasImage = true;
       overlay.classList.add("hidden");
       fitToWindow();
+    }
+
+    function applyInitialAutoDetect(autoDetect) {
+      if (!autoDetect || !Array.isArray(autoDetect.quads)) return;
+      state.quads = autoDetect.quads;
+      state.selectedQuad = -1;
+      if (Number.isFinite(autoDetect.target_block_count)) {
+        blocksInput.value = autoDetect.target_block_count;
+      }
+      if (Number.isFinite(autoDetect.rows)) rowsInput.value = autoDetect.rows;
+      if (Number.isFinite(autoDetect.cols)) colsInput.value = autoDetect.cols;
+      draw();
     }
 
     function fitToWindow() {
@@ -1481,12 +1689,12 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       }
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(state.image, state.offsetX, state.offsetY, state.imageWidth * state.zoom, state.imageHeight * state.zoom);
-      state.quads.forEach((quad, index) => drawQuad(quad, index === state.selectedQuad, false));
+      state.quads.forEach((quad, index) => drawQuad(quad, index === state.selectedQuad, false, index));
       if (state.createPreview) drawQuad(state.createPreview, false, true);
       updateControls();
     }
 
-    function drawQuad(quad, selected, preview) {
+    function drawQuad(quad, selected, preview, quadIndex = -1) {
       const color = preview ? "#b9c0c8" : (selected ? "#ffcf40" : "#42d9ff");
       ctx.save();
       ctx.strokeStyle = color;
@@ -1508,6 +1716,43 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
         ctx.fill();
         ctx.stroke();
       });
+      if (!preview && shouldShowColorCheckerLabels()) {
+        drawPatchLabel(quad, quadIndex);
+      }
+      ctx.restore();
+    }
+
+    function shouldShowColorCheckerLabels() {
+      return parseInt(rowsInput.value, 10) === 4
+        && parseInt(colsInput.value, 10) === 6
+        && state.quads.length === 24;
+    }
+
+    function colorCheckerPatchForBlock(blockIndex) {
+      const standardIndex = state.chartOrientationDegrees === 180 ? 25 - blockIndex : blockIndex;
+      return COLORCHECKER_CLASSIC_24[standardIndex - 1] || null;
+    }
+
+    function drawPatchLabel(quad, quadIndex) {
+      const patch = colorCheckerPatchForBlock(quadIndex + 1);
+      if (!patch) return;
+      const center = quad.reduce((acc, point) => [acc[0] + point[0] / 4, acc[1] + point[1] / 4], [0, 0]);
+      const canvasPoint = imageToCanvas(center);
+      const text = patch.label;
+      ctx.save();
+      ctx.font = "600 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const metrics = ctx.measureText(text);
+      const paddingX = 5;
+      const width = metrics.width + paddingX * 2;
+      const height = 18;
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.fillRect(canvasPoint.x - width / 2, canvasPoint.y - height / 2, width, height);
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.strokeRect(canvasPoint.x - width / 2, canvasPoint.y - height / 2, width, height);
+      ctx.fillStyle = "#f4f7fb";
+      ctx.fillText(text, canvasPoint.x, canvasPoint.y);
       ctx.restore();
     }
 
@@ -1750,6 +1995,7 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       state.drag = null;
       state.createPreview = null;
       state.fittedOnce = false;
+      state.chartOrientationDegrees = 0;
       savedEl.textContent = "";
       draw();
     }
@@ -1779,7 +2025,15 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       if (!state.hasImage) return;
       try {
         const target = parseInt(blocksInput.value, 10);
-        const data = await postJson("/api/save", { target_block_count: target, quads: state.quads });
+        const rows = parseInt(rowsInput.value, 10);
+        const cols = parseInt(colsInput.value, 10);
+        const data = await postJson("/api/save", {
+          target_block_count: target,
+          rows,
+          cols,
+          chart_orientation_degrees: state.chartOrientationDegrees,
+          quads: state.quads
+        });
         updateStatus(data.status, null);
         savedEl.textContent = data.path;
       } catch (error) {
@@ -1801,6 +2055,8 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
       const saveReady = ready && Number.isFinite(target) && target > 0 && state.quads.length === target;
       retryButton.disabled = state.loading || ready || !state.retryAvailable;
       detectButton.disabled = !ready;
+      rotateChartButton.disabled = !ready || parseInt(rowsInput.value, 10) !== 4 || parseInt(colsInput.value, 10) !== 6 || state.quads.length !== 24;
+      rotateChartButton.textContent = "色卡 " + state.chartOrientationDegrees + "°";
       fitButton.disabled = !ready;
       deleteButton.disabled = !ready || state.selectedQuad < 0;
       clearButton.disabled = !ready || state.quads.length === 0;
@@ -1811,6 +2067,10 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
     blocksInput.addEventListener("input", updateControls);
     retryButton.addEventListener("click", retryCamera);
     detectButton.addEventListener("click", autoDetect);
+    rotateChartButton.addEventListener("click", () => {
+      state.chartOrientationDegrees = state.chartOrientationDegrees === 180 ? 0 : 180;
+      draw();
+    });
     fitButton.addEventListener("click", fitToWindow);
     deleteButton.addEventListener("click", deleteSelected);
     clearButton.addEventListener("click", clearQuads);
@@ -1840,6 +2100,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--blocks", type=int, default=24, help="Expected total color-block count.")
     parser.add_argument("--rows", type=int, default=4, help="Grid row count for automatic block detection.")
     parser.add_argument("--cols", type=int, default=6, help="Grid column count for automatic block detection.")
+    parser.add_argument(
+        "--chart-orientation",
+        type=int,
+        choices=SUPPORTED_COLORCHECKER_ORIENTATIONS,
+        default=0,
+        help="Standard ColorChecker Classic 24 orientation for 4x6 patch metadata.",
+    )
     parser.add_argument("--host", default=DEFAULT_UI_HOST, help="Local Web UI bind host.")
     parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT, help="Local Web UI bind port; uses the next free port if occupied.")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the local Web UI in the default browser.")

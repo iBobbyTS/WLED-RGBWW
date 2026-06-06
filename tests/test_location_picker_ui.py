@@ -279,6 +279,82 @@ class LocationConfigTests(unittest.TestCase):
                 capture=None,
             )
 
+    def test_build_location_config_adds_standard_colorchecker_metadata(self):
+        quads = [[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] for _index in range(24)]
+
+        config = location_picker_ui.build_location_config(
+            target_block_count=24,
+            image_width=100,
+            image_height=50,
+            quads=quads,
+            capture=None,
+            rows=4,
+            cols=6,
+            chart_orientation_degrees=0,
+        )
+
+        self.assertEqual(config["chart"]["type"], "colorchecker_classic_24")
+        self.assertEqual(config["chart"]["orientation_degrees"], 0)
+        self.assertEqual(config["blocks"][0]["patch"]["name"], "dark_skin")
+        self.assertEqual(config["blocks"][12]["patch"]["name"], "blue")
+        self.assertIn("hue_anchor", config["blocks"][12]["patch"]["roles"])
+        self.assertEqual(config["blocks"][18]["patch"]["name"], "white")
+        self.assertIn("exposure", config["blocks"][18]["patch"]["roles"])
+
+    def test_build_location_config_supports_180_degree_colorchecker_metadata(self):
+        quads = [[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] for _index in range(24)]
+
+        config = location_picker_ui.build_location_config(
+            target_block_count=24,
+            image_width=100,
+            image_height=50,
+            quads=quads,
+            capture=None,
+            rows=4,
+            cols=6,
+            chart_orientation_degrees=180,
+        )
+
+        self.assertEqual(config["chart"]["orientation_degrees"], 180)
+        self.assertEqual(config["chart"]["standard_index_formula"], "25 - block_index")
+        self.assertEqual(config["blocks"][0]["patch"]["name"], "black")
+        self.assertEqual(config["blocks"][5]["patch"]["name"], "white")
+        self.assertEqual(config["blocks"][6]["patch"]["name"], "cyan")
+        self.assertEqual(config["blocks"][7]["patch"]["name"], "magenta")
+        self.assertEqual(config["blocks"][8]["patch"]["name"], "yellow")
+        self.assertEqual(config["blocks"][9]["patch"]["name"], "red")
+        self.assertEqual(config["blocks"][10]["patch"]["name"], "green")
+        self.assertEqual(config["blocks"][11]["patch"]["name"], "blue")
+
+    def test_build_location_config_omits_colorchecker_metadata_for_other_grids(self):
+        config = location_picker_ui.build_location_config(
+            target_block_count=1,
+            image_width=100,
+            image_height=50,
+            quads=[[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]],
+            capture=None,
+            rows=1,
+            cols=1,
+        )
+
+        self.assertNotIn("chart", config)
+        self.assertNotIn("patch", config["blocks"][0])
+
+    def test_build_location_config_omits_colorchecker_metadata_when_block_count_is_not_24(self):
+        config = location_picker_ui.build_location_config(
+            target_block_count=1,
+            image_width=100,
+            image_height=50,
+            quads=[[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]],
+            capture=None,
+            rows=4,
+            cols=6,
+            chart_orientation_degrees=180,
+        )
+
+        self.assertNotIn("chart", config)
+        self.assertNotIn("patch", config["blocks"][0])
+
     def test_save_location_config_writes_under_requested_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "config" / "location"
@@ -296,6 +372,7 @@ class LocationWebApiTests(unittest.TestCase):
             blocks=1,
             rows=1,
             cols=1,
+            chart_orientation=0,
             target_max=location_picker_ui.DEFAULT_TARGET_MAX,
             iso="100",
             aperture="4",
@@ -323,6 +400,16 @@ class LocationWebApiTests(unittest.TestCase):
         state.loading = False
         return state
 
+    def make_colorchecker_state(self) -> location_picker_ui.LocationPickerState:
+        state = self.make_state()
+        state.args.blocks = 24
+        state.args.rows = 4
+        state.args.cols = 6
+        state.args.chart_orientation = 0
+        state.image_width = 10
+        state.image_height = 10
+        return state
+
     def start_server(self, state: location_picker_ui.LocationPickerState):
         server = location_picker_ui.create_location_picker_server(host="127.0.0.1", port=0, state=state)
         thread = location_picker_ui.threading.Thread(target=server.serve_forever, daemon=True)
@@ -346,17 +433,24 @@ class LocationWebApiTests(unittest.TestCase):
             server.server_close()
 
     def test_save_endpoint_validates_and_writes_config(self):
-        state = self.make_state()
+        state = self.make_colorchecker_state()
         server, base_url = self.start_server(state)
         with tempfile.TemporaryDirectory() as tmpdir:
             output_dir = Path(tmpdir) / "locations"
+            quads = [
+                [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 1}, {"x": 0, "y": 1}]
+                for _index in range(24)
+            ]
             try:
                 request = urllib.request.Request(
                     base_url + "/api/save",
                     data=json.dumps(
                         {
-                            "target_block_count": 1,
-                            "quads": [[{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 0}]],
+                            "target_block_count": 24,
+                            "rows": 4,
+                            "cols": 6,
+                            "chart_orientation_degrees": 180,
+                            "quads": quads,
                         }
                     ).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
@@ -369,7 +463,10 @@ class LocationWebApiTests(unittest.TestCase):
                 saved_path = Path(payload["path"])
                 self.assertEqual(saved_path.parent, output_dir)
                 self.assertTrue(saved_path.exists())
-                self.assertEqual(payload["config"]["target_block_count"], 1)
+                self.assertEqual(payload["config"]["target_block_count"], 24)
+                self.assertEqual(payload["config"]["chart"]["orientation_degrees"], 180)
+                self.assertEqual(payload["config"]["blocks"][0]["patch"]["name"], "black")
+                self.assertEqual(payload["config"]["blocks"][5]["patch"]["name"], "white")
             finally:
                 server.shutdown()
                 server.server_close()
@@ -399,6 +496,7 @@ class LocationWebApiTests(unittest.TestCase):
             blocks=1,
             rows=1,
             cols=1,
+            chart_orientation=0,
             target_max=location_picker_ui.DEFAULT_TARGET_MAX,
             iso="100",
             aperture="4",
@@ -450,6 +548,88 @@ class LocationWebApiTests(unittest.TestCase):
                     finally:
                         server.shutdown()
                         server.server_close()
+
+    def test_capture_success_exposes_initial_auto_detect_quads(self):
+        args = Namespace(
+            blocks=24,
+            rows=4,
+            cols=6,
+            chart_orientation=0,
+            target_max=location_picker_ui.DEFAULT_TARGET_MAX,
+            iso="100",
+            aperture="4",
+            min_shutter_speed="1/8000",
+            max_shutter_speed="30",
+            max_exposure_trials=1,
+            model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
+            camera_port=None,
+            gphoto2="gphoto2",
+            timeout=1.0,
+        )
+        state = location_picker_ui.LocationPickerState(args=args)
+        capture = camera_gphoto2.CaptureResult(
+            connection=camera_gphoto2.CameraConnection("Canon EOS R6 Mark III", "usb:001,010"),
+            settings=camera_gphoto2.CaptureSettings(iso="100", aperture="4", shutter_speed="1/30", image_format="RAW"),
+            saved_file=Path("tmp/location-ui/camera/test.cr3"),
+            stdout="",
+        )
+        auto_result = camera_gphoto2.AutoExposureResult(target_max=49152, final_capture=capture, trials=())
+        preview = np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8)
+        quads = [[(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (0.0, 0.0)] for _index in range(24)]
+
+        with mock.patch.object(location_picker_ui.camera_gphoto2, "auto_expose_capture", return_value=auto_result):
+            with mock.patch.object(location_picker_ui, "find_npy_output", return_value=Path("unused.npy")):
+                with mock.patch.object(location_picker_ui, "load_preview_from_npy", return_value=preview):
+                    with mock.patch.object(location_picker_ui, "detect_color_checker_quads", return_value=quads) as detect:
+                        self.assertTrue(state.start_auto_exposure())
+                        self.wait_for_state(state, lambda snapshot: snapshot["has_image"])
+
+        snapshot = state.snapshot()
+        detect.assert_called_once_with(preview, rows=4, cols=6)
+        self.assertIn("已自动识别 4x6 色块", snapshot["status"])
+        self.assertEqual(snapshot["auto_detect"]["target_block_count"], 24)
+        self.assertEqual(len(snapshot["auto_detect"]["quads"]), 24)
+        self.assertIsNone(snapshot["auto_detect"]["error"])
+
+    def test_capture_success_keeps_preview_when_initial_auto_detect_fails(self):
+        args = Namespace(
+            blocks=24,
+            rows=4,
+            cols=6,
+            chart_orientation=0,
+            target_max=location_picker_ui.DEFAULT_TARGET_MAX,
+            iso="100",
+            aperture="4",
+            min_shutter_speed="1/8000",
+            max_shutter_speed="30",
+            max_exposure_trials=1,
+            model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
+            camera_port=None,
+            gphoto2="gphoto2",
+            timeout=1.0,
+        )
+        state = location_picker_ui.LocationPickerState(args=args)
+        capture = camera_gphoto2.CaptureResult(
+            connection=camera_gphoto2.CameraConnection("Canon EOS R6 Mark III", "usb:001,010"),
+            settings=camera_gphoto2.CaptureSettings(iso="100", aperture="4", shutter_speed="1/30", image_format="RAW"),
+            saved_file=Path("tmp/location-ui/camera/test.cr3"),
+            stdout="",
+        )
+        auto_result = camera_gphoto2.AutoExposureResult(target_max=49152, final_capture=capture, trials=())
+        preview = np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8)
+
+        with mock.patch.object(location_picker_ui.camera_gphoto2, "auto_expose_capture", return_value=auto_result):
+            with mock.patch.object(location_picker_ui, "find_npy_output", return_value=Path("unused.npy")):
+                with mock.patch.object(location_picker_ui, "load_preview_from_npy", return_value=preview):
+                    with mock.patch.object(location_picker_ui, "detect_color_checker_quads", side_effect=RuntimeError("not found")):
+                        self.assertTrue(state.start_auto_exposure())
+                        self.wait_for_state(state, lambda snapshot: snapshot["has_image"])
+
+        snapshot = state.snapshot()
+        self.assertTrue(snapshot["has_image"])
+        self.assertIn("自动识别失败: not found", snapshot["status"])
+        self.assertIsNone(snapshot["auto_detect"]["quads"])
+        self.assertEqual(snapshot["auto_detect"]["error"], "not found")
 
     def wait_for_state(self, state: location_picker_ui.LocationPickerState, predicate) -> None:
         deadline = time.monotonic() + 5
