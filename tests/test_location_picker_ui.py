@@ -18,14 +18,30 @@ import location_picker_ui
 class LocationArgsTests(unittest.TestCase):
     def test_parse_args_includes_exposure_trial_limit(self):
         default_args = location_picker_ui.parse_args([])
-        custom_args = location_picker_ui.parse_args(["--max-exposure-trials", "3", "--ui-port", "0", "--port", "usb:001,010"])
+        custom_args = location_picker_ui.parse_args(
+            [
+                "--max-exposure-trials",
+                "3",
+                "--ui-port",
+                "0",
+                "--port",
+                "usb:001,010",
+                "--metering-mode",
+                "location",
+                "--metering-location-config",
+                "config/location/example.json",
+            ]
+        )
 
         self.assertEqual(default_args.max_exposure_trials, location_picker_ui.DEFAULT_MAX_EXPOSURE_TRIALS)
         self.assertEqual(default_args.rows, 4)
         self.assertEqual(default_args.cols, 6)
+        self.assertEqual(default_args.metering_mode, camera_gphoto2.METERING_MODE_FULL)
         self.assertEqual(custom_args.max_exposure_trials, 3)
         self.assertEqual(custom_args.ui_port, 0)
         self.assertEqual(custom_args.camera_port, "usb:001,010")
+        self.assertEqual(custom_args.metering_mode, camera_gphoto2.METERING_MODE_LOCATION)
+        self.assertEqual(custom_args.metering_location_config, Path("config/location/example.json"))
 
 
 class LocationPreviewTests(unittest.TestCase):
@@ -379,6 +395,8 @@ class LocationWebApiTests(unittest.TestCase):
             min_shutter_speed="1/8000",
             max_shutter_speed="30",
             max_exposure_trials=1,
+            metering_mode=camera_gphoto2.METERING_MODE_FULL,
+            metering_location_config=None,
             model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
             camera_port=None,
             gphoto2="gphoto2",
@@ -503,6 +521,8 @@ class LocationWebApiTests(unittest.TestCase):
             min_shutter_speed="1/8000",
             max_shutter_speed="30",
             max_exposure_trials=1,
+            metering_mode=camera_gphoto2.METERING_MODE_FULL,
+            metering_location_config=None,
             model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
             camera_port=None,
             gphoto2="gphoto2",
@@ -549,6 +569,55 @@ class LocationWebApiTests(unittest.TestCase):
                         server.shutdown()
                         server.server_close()
 
+    def test_capture_worker_passes_location_metering_regions(self):
+        args = Namespace(
+            blocks=24,
+            rows=4,
+            cols=6,
+            chart_orientation=0,
+            target_max=location_picker_ui.DEFAULT_TARGET_MAX,
+            iso="100",
+            aperture="4",
+            min_shutter_speed="1/8000",
+            max_shutter_speed="30",
+            max_exposure_trials=1,
+            metering_mode=camera_gphoto2.METERING_MODE_LOCATION,
+            metering_location_config=Path("config/location/test.json"),
+            model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
+            camera_port=None,
+            gphoto2="gphoto2",
+            timeout=1.0,
+        )
+        state = location_picker_ui.LocationPickerState(args=args)
+        capture = camera_gphoto2.CaptureResult(
+            connection=camera_gphoto2.CameraConnection("Canon EOS R6 Mark III", "usb:001,010"),
+            settings=camera_gphoto2.CaptureSettings(iso="100", aperture="4", shutter_speed="1/30", image_format="RAW"),
+            saved_file=Path("tmp/location-ui/camera/test.cr3"),
+            stdout="",
+            decoded=camera_gphoto2.DecodeResult(
+                source_file=Path("tmp/location-ui/camera/test.cr3"),
+                output_files=(Path("tmp/location-ui/decoded/test.npy"),),
+                metadata_file=Path("tmp/location-ui/decoded/test.json"),
+                image_shape=(1, 1, 3),
+                image_dtype="uint8",
+                stats={"image": {"max": 100}, "raw_visible": {"max": 25}},
+            ),
+        )
+        auto_result = camera_gphoto2.AutoExposureResult(target_max=49152, final_capture=capture, trials=())
+        preview = np.array([[[10, 20, 30]]], dtype=np.uint8)
+        regions = [{"type": "full", "name": "meter"}]
+
+        with mock.patch.object(location_picker_ui.camera_gphoto2, "load_metering_regions", return_value=regions) as load_regions:
+            with mock.patch.object(location_picker_ui.camera_gphoto2, "auto_expose_capture", return_value=auto_result) as auto_expose:
+                with mock.patch.object(location_picker_ui, "find_npy_output", return_value=Path("unused.npy")):
+                    with mock.patch.object(location_picker_ui, "load_preview_from_npy", return_value=preview):
+                        with mock.patch.object(location_picker_ui, "detect_color_checker_quads", side_effect=RuntimeError("not found")):
+                            self.assertTrue(state.start_auto_exposure())
+                            self.wait_for_state(state, lambda snapshot: snapshot["has_image"])
+
+        load_regions.assert_called_once_with(Path("config/location/test.json"))
+        self.assertIs(auto_expose.call_args.kwargs["metering_regions"], regions)
+
     def test_capture_success_exposes_initial_auto_detect_quads(self):
         args = Namespace(
             blocks=24,
@@ -561,6 +630,8 @@ class LocationWebApiTests(unittest.TestCase):
             min_shutter_speed="1/8000",
             max_shutter_speed="30",
             max_exposure_trials=1,
+            metering_mode=camera_gphoto2.METERING_MODE_FULL,
+            metering_location_config=None,
             model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
             camera_port=None,
             gphoto2="gphoto2",
@@ -603,6 +674,8 @@ class LocationWebApiTests(unittest.TestCase):
             min_shutter_speed="1/8000",
             max_shutter_speed="30",
             max_exposure_trials=1,
+            metering_mode=camera_gphoto2.METERING_MODE_FULL,
+            metering_location_config=None,
             model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
             camera_port=None,
             gphoto2="gphoto2",

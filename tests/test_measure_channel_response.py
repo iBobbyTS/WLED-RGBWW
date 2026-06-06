@@ -134,6 +134,8 @@ class MeasureChannelResponseRunTests(unittest.TestCase):
         self.assertEqual(data["status"], "dry_run")
         self.assertEqual(len(data["plan"]), 2)
         self.assertEqual(data["plan"][1]["code"], 2)
+        self.assertEqual(data["camera"]["auto_exposure_metering"]["mode"], camera_gphoto2.METERING_MODE_FULL)
+        self.assertIsNone(data["camera"]["auto_exposure_metering"]["regions"])
 
     def test_run_writes_measurements_and_turns_light_off(self):
         light_calls = []
@@ -152,8 +154,10 @@ class MeasureChannelResponseRunTests(unittest.TestCase):
         class FakeAutoExpose:
             def __init__(self):
                 self.count = 0
+                self.metering_regions = []
 
             def __call__(self, *, output_dir, filename_template, decode_output_dir, decode_formats, **kwargs):
+                self.metering_regions.append(kwargs.get("metering_regions"))
                 output_path = Path(output_dir)
                 decode_path = Path(decode_output_dir)
                 output_path.mkdir(parents=True, exist_ok=True)
@@ -182,6 +186,8 @@ class MeasureChannelResponseRunTests(unittest.TestCase):
                 self.count += 1
                 return camera_gphoto2.AutoExposureResult(target_max=49152, final_capture=capture, trials=())
 
+        auto_expose = FakeAutoExpose()
+        metering_regions = [{"type": "full", "name": "meter"}]
         with project_temp_dir() as tmpdir:
             output = measure_channel_response.run_channel_response(
                 output_root=Path(tmpdir),
@@ -204,8 +210,9 @@ class MeasureChannelResponseRunTests(unittest.TestCase):
                 max_trials=5,
                 max_captures=10,
                 decode_formats=("npy",),
+                auto_exposure_metering_regions=metering_regions,
                 light_fn=fake_light,
-                auto_expose_fn=FakeAutoExpose(),
+                auto_expose_fn=auto_expose,
             )
 
             data = json.loads(output.read_text(encoding="utf-8"))
@@ -214,8 +221,10 @@ class MeasureChannelResponseRunTests(unittest.TestCase):
         self.assertIsNotNone(data["ambient"])
         self.assertEqual(len(data["measurements"]), 1)
         self.assertEqual(data["measurements"][0]["command"]["cw"], 1)
+        self.assertEqual(data["camera"]["auto_exposure_metering"]["mode"], camera_gphoto2.METERING_MODE_LOCATION)
         self.assertEqual(data["measurements"][0]["regions"][0]["normalized"]["channel_mean_per_second"], [40.0, 40.0, 40.0])
         self.assertEqual(data["measurements"][0]["regions"][0]["ambient_subtracted"]["channel_mean_per_second"], [20.0, 20.0, 20.0])
+        self.assertEqual(auto_expose.metering_regions, [metering_regions, metering_regions])
         self.assertEqual(light_calls[0], {"cw": 0, "ww": 0, "r": 0, "g": 0, "b": 0})
         self.assertEqual(light_calls[-1], {"cw": 0, "ww": 0, "r": 0, "g": 0, "b": 0})
 

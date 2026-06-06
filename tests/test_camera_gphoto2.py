@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from fractions import Fraction
@@ -234,6 +235,85 @@ class CameraGPhoto2DecodeTests(unittest.TestCase):
         self.assertEqual(kwargs["gamma"], (1.0, 1.0))
         self.assertEqual(kwargs["output_bps"], 16)
 
+    def test_decode_raw_image_writes_location_metering_stats(self):
+        class FakeSizes:
+            raw_height = 4
+            raw_width = 4
+            height = 2
+            width = 3
+            top_margin = 1
+            left_margin = 1
+            iheight = 2
+            iwidth = 3
+
+        class FakeRaw:
+            sizes = FakeSizes()
+            num_colors = 3
+            color_desc = b"RGBG"
+            raw_pattern = np.array([[0, 1], [3, 2]])
+            raw_image_visible = np.array([[10, 20], [30, 40]], dtype=np.uint16)
+            black_level_per_channel = [0, 32, 96, 64]
+            white_level = 16383
+            camera_white_level_per_channel = [144, 144, 144, 144]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                return None
+
+            def postprocess(self, **_kwargs):
+                return np.array(
+                    [
+                        [[100, 200, 300], [110, 210, 310], [50000, 50000, 50000]],
+                        [[120, 220, 320], [130, 230, 330], [65535, 65535, 65535]],
+                    ],
+                    dtype=np.uint16,
+                )
+
+        class FakeDemosaicAlgorithm:
+            AHD = object()
+
+        class FakeColorSpace:
+            raw = object()
+
+        class FakeRawpy:
+            __version__ = "test-rawpy"
+            libraw_version = (0, 0, 0)
+            DemosaicAlgorithm = FakeDemosaicAlgorithm
+            ColorSpace = FakeColorSpace
+
+            def imread(self, _path):
+                return FakeRaw()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_file = Path(tmpdir) / "input.cr3"
+            raw_file.write_bytes(b"fake raw")
+
+            result = camera_gphoto2.decode_raw_image(
+                raw_file,
+                output_dir=tmpdir,
+                output_stem="decoded",
+                formats=("npy",),
+                rawpy_module=FakeRawpy(),
+                numpy_module=np,
+                metering_regions=[
+                    {
+                        "type": "polygon",
+                        "name": "block_01",
+                        "index": 1,
+                        "points": [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)],
+                    }
+                ],
+            )
+
+        self.assertEqual(result.stats["image"]["max"], 65535)
+        self.assertEqual(result.stats["metering"]["mode"], camera_gphoto2.METERING_MODE_LOCATION)
+        self.assertEqual(result.stats["metering"]["region_count"], 1)
+        self.assertEqual(result.stats["metering"]["image"]["max"], 330)
+        self.assertEqual(result.to_jsonable()["image_max"], 65535)
+        self.assertEqual(result.to_jsonable()["metering"]["image_max"], 330)
+
     def test_decode_raw_image_rejects_unknown_format(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             raw_file = Path(tmpdir) / "input.cr3"
@@ -256,6 +336,109 @@ class CameraGPhoto2AutoExposureTests(unittest.TestCase):
         )
 
         self.assertEqual(candidates, ("1/100", "1/10", "1"))
+
+    def test_load_metering_regions_requires_24_blocks(self):
+        config = {"blocks": []}
+        for index in range(1, 25):
+            config["blocks"].append(
+                {
+                    "index": index,
+                    "points": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 1}, {"x": 0, "y": 1}],
+                }
+            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "locations.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+
+            regions = camera_gphoto2.load_metering_regions(path)
+
+        self.assertEqual(len(regions), 24)
+        self.assertEqual(regions[0]["name"], "block_01")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "locations.json"
+            path.write_text(json.dumps({"blocks": config["blocks"][:23]}), encoding="utf-8")
+
+            with self.assertRaisesRegex(camera_gphoto2.GPhoto2Error, "exactly 24"):
+                camera_gphoto2.load_metering_regions(path)
+
+    def test_auto_expose_uses_metering_stats_when_available(self):
+        current_shutter = {"value": "1/100"}
+        trial_shutters = []
+        metering_max_by_shutter = {
+            "1/100": 10000,
+            "1/50": 48000,
+            "1/25": 52000,
+        }
+
+        def runner(args):
+            if args == ["--auto-detect"]:
+                return camera_gphoto2.CommandOutput(
+                    "Model                          Port\n"
+                    "----------------------------------------------------------\n"
+                    "Canon EOS R6 Mark III          usb:001,010\n"
+                )
+            if "--set-config" in args:
+                for value in args:
+                    if value.startswith(f"{camera_gphoto2.CONFIG_SHUTTER_SPEED}="):
+                        current_shutter["value"] = value.split("=", 1)[1]
+                return camera_gphoto2.CommandOutput("")
+            if args == ["--port", "usb:001,010", "--get-config", camera_gphoto2.CONFIG_SHUTTER_SPEED]:
+                return camera_gphoto2.CommandOutput(f"Label: Shutter Speed\nCurrent: {current_shutter['value']}\nEND\n")
+            if "--capture-image-and-download" in args:
+                filename = Path(args[args.index("--filename") + 1])
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                filename.write_text(current_shutter["value"], encoding="utf-8")
+                if filename.name.startswith("trial-"):
+                    trial_shutters.append(current_shutter["value"])
+                return camera_gphoto2.CommandOutput(f"Saving file as {filename}\n")
+            raise AssertionError(args)
+
+        def decoder(raw_file, *, output_dir=None, formats=("npy",), metering_regions=None):
+            raw_path = Path(raw_file)
+            shutter = raw_path.read_text(encoding="utf-8")
+            target_dir = Path(output_dir) if output_dir is not None else raw_path.parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+            output_file = target_dir / f"{raw_path.stem}.json"
+            output_file.write_text("{}", encoding="utf-8")
+            metering_max = metering_max_by_shutter[shutter]
+            self.assertIsNotNone(metering_regions)
+            return camera_gphoto2.DecodeResult(
+                source_file=raw_path,
+                output_files=(output_file,),
+                metadata_file=output_file,
+                image_shape=(2, 2, 3),
+                image_dtype="uint16",
+                stats={
+                    "image": {"max": 65535, "channel_max": [65535, 65535, 65535]},
+                    "raw_visible": {"max": 16000},
+                    "exposure": {"channel_contrast_max": 60000.0},
+                    "metering": {
+                        "mode": camera_gphoto2.METERING_MODE_LOCATION,
+                        "image": {"max": metering_max, "channel_max": [100, metering_max, 90]},
+                        "exposure": {"channel_contrast_max": 30000.0},
+                    },
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = camera_gphoto2.auto_expose_capture(
+                output_dir=Path(tmpdir) / "final",
+                filename_template="final.cr3",
+                target_max=49152,
+                shutter_speeds=("1/100", "1/50", "1/25"),
+                decode_output_dir=Path(tmpdir) / "decoded",
+                decode_formats=("npy",),
+                metering_regions=[{"type": "full", "name": "test_meter"}],
+                runner=runner,
+                decoder=decoder,
+            )
+
+        self.assertEqual(trial_shutters, ["1/100", "1/25", "1/50"])
+        self.assertEqual(result.final_capture.settings.shutter_speed, "1/50")
+        self.assertEqual(result.final_capture.decoded.stats["image"]["max"], 65535)
+        self.assertEqual(result.final_capture.decoded.stats["metering"]["image"]["max"], 48000)
+        self.assertEqual(result.trials[-1].decoded_max, 48000)
 
     def test_auto_expose_deletes_trials_and_saves_only_final_capture(self):
         current_shutter = {"value": "1/100"}

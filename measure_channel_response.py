@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import time
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -11,6 +10,7 @@ from typing import Any, Callable, Sequence
 
 import camera_gphoto2
 import esphome
+import location_regions
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -187,18 +187,7 @@ def find_npy_output(capture: camera_gphoto2.CaptureResult) -> Path:
 
 
 def load_location_regions(path: Path, block_indices: str | tuple[int, ...]) -> list[dict[str, Any]]:
-    config = json.loads(path.read_text(encoding="utf-8"))
-    wanted = None if block_indices == "all" else set(block_indices)
-    regions: list[dict[str, Any]] = []
-    for block in config.get("blocks", []):
-        index = int(block["index"])
-        if wanted is not None and index not in wanted:
-            continue
-        points = [(float(point["x"]), float(point["y"])) for point in block["points"]]
-        regions.append({"type": "polygon", "name": f"block_{index:02d}", "index": index, "points": points})
-    if not regions:
-        raise ValueError(f"no location regions selected from {path}")
-    return regions
+    return location_regions.load_location_regions(path, block_indices)
 
 
 def build_region_specs(
@@ -308,6 +297,7 @@ def run_channel_response(
     max_trials: int,
     max_captures: int,
     decode_formats: Sequence[str],
+    auto_exposure_metering_regions: Sequence[dict[str, Any]] | None = None,
     output_json: Path | None = None,
     light_fn: LightFn = esphome.light,
     auto_expose_fn: AutoExposeFn = camera_gphoto2.auto_expose_capture,
@@ -362,6 +352,10 @@ def run_channel_response(
             "max_trials": int(max_trials),
             "max_captures": int(max_captures),
             "decode_formats": list(decode_formats),
+            "auto_exposure_metering": {
+                "mode": camera_gphoto2.METERING_MODE_LOCATION if auto_exposure_metering_regions is not None else camera_gphoto2.METERING_MODE_FULL,
+                "regions": _jsonable_regions(auto_exposure_metering_regions) if auto_exposure_metering_regions is not None else None,
+            },
         },
         "plan": plan,
         "ambient": None,
@@ -394,6 +388,7 @@ def run_channel_response(
                 max_trials=max_trials,
                 max_captures=max_captures,
                 decode_formats=decode_formats,
+                metering_regions=auto_exposure_metering_regions,
             )
             ambient_shutter_seconds = shutter_seconds(ambient_capture.final_capture.settings.shutter_speed)
             ambient_image = _load_npy(find_npy_output(ambient_capture.final_capture))
@@ -431,6 +426,7 @@ def run_channel_response(
                 max_trials=max_trials,
                 max_captures=max_captures,
                 decode_formats=decode_formats,
+                metering_regions=auto_exposure_metering_regions,
             )
             seconds = shutter_seconds(capture.final_capture.settings.shutter_speed)
             image = _load_npy(find_npy_output(capture.final_capture))
@@ -485,6 +481,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--roi", type=parse_roi, action="append", help="Measurement ROI as x,y,width,height. Repeatable.")
     parser.add_argument("--location-config", type=Path, help="Location picker JSON with color-block quadrilaterals.")
     parser.add_argument("--block-indices", type=parse_block_indices, default="all")
+    parser.add_argument(
+        "--auto-exposure-metering-mode",
+        choices=(camera_gphoto2.METERING_MODE_FULL, camera_gphoto2.METERING_MODE_LOCATION),
+        default=camera_gphoto2.METERING_MODE_FULL,
+        help="Use the full decoded image or a saved 24-block location config for auto-exposure metering.",
+    )
+    parser.add_argument(
+        "--auto-exposure-metering-location-config",
+        type=Path,
+        help="Location picker JSON used when --auto-exposure-metering-mode=location.",
+    )
     parser.add_argument("--no-ambient", action="store_true", help="Skip the initial all-off ambient capture.")
     parser.add_argument("--target-max", type=int, default=camera_gphoto2.DEFAULT_AUTO_EXPOSURE_MAX)
     parser.add_argument("--iso", default=camera_gphoto2.DEFAULT_ISO)
@@ -506,6 +513,11 @@ def main(argv: list[str] | None = None) -> int:
         location_config=args.location_config,
         block_indices=args.block_indices,
     )
+    auto_exposure_metering_regions = None
+    if args.auto_exposure_metering_mode == camera_gphoto2.METERING_MODE_LOCATION:
+        if args.auto_exposure_metering_location_config is None:
+            raise ValueError("--auto-exposure-metering-location-config is required when --auto-exposure-metering-mode=location")
+        auto_exposure_metering_regions = camera_gphoto2.load_metering_regions(args.auto_exposure_metering_location_config)
     output_json = run_channel_response(
         output_root=args.output_dir,
         run_name=args.run_name,
@@ -527,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         max_trials=args.max_trials,
         max_captures=args.max_captures,
         decode_formats=tuple(args.decode_formats or DEFAULT_DECODE_FORMATS),
+        auto_exposure_metering_regions=auto_exposure_metering_regions,
         output_json=args.output_json,
     )
     print(output_json)
@@ -548,6 +561,7 @@ def _capture_auto_exposed(
     max_trials: int,
     max_captures: int,
     decode_formats: Sequence[str],
+    metering_regions: Sequence[dict[str, Any]] | None = None,
 ) -> camera_gphoto2.AutoExposureResult:
     return auto_expose_fn(
         output_dir=camera_dir,
@@ -562,50 +576,12 @@ def _capture_auto_exposed(
         max_captures=max_captures,
         decode_output_dir=decode_dir,
         decode_formats=decode_formats,
+        metering_regions=metering_regions,
     )
 
 
 def _extract_region(np: Any, image: Any, region: dict[str, Any]) -> Any:
-    if len(image.shape) != 3:
-        raise ValueError("decoded image must be HxWxC")
-    if region["type"] == "full":
-        return image
-    if region["type"] == "roi":
-        x = int(region["x"])
-        y = int(region["y"])
-        width = int(region["width"])
-        height = int(region["height"])
-        if x + width > image.shape[1] or y + height > image.shape[0]:
-            raise ValueError(f"ROI {region['name']} exceeds image bounds")
-        return image[y : y + height, x : x + width]
-    if region["type"] == "polygon":
-        return _extract_polygon(np, image, region["points"])
-    raise ValueError(f"unsupported region type: {region['type']}")
-
-
-def _extract_polygon(np: Any, image: Any, points: Sequence[tuple[float, float]]) -> Any:
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    min_x = max(0, int(math.floor(min(xs))))
-    max_x = min(image.shape[1] - 1, int(math.ceil(max(xs))))
-    min_y = max(0, int(math.floor(min(ys))))
-    max_y = min(image.shape[0] - 1, int(math.ceil(max(ys))))
-    if max_x < min_x or max_y < min_y:
-        raise ValueError("polygon is outside image bounds")
-    yy, xx = np.mgrid[min_y : max_y + 1, min_x : max_x + 1]
-    px = xx.astype("float64") + 0.5
-    py = yy.astype("float64") + 0.5
-    inside = np.zeros(px.shape, dtype=bool)
-    count = len(points)
-    for index in range(count):
-        x1, y1 = points[index]
-        x2, y2 = points[(index + 1) % count]
-        crosses = ((y1 > py) != (y2 > py)) & (px < (x2 - x1) * (py - y1) / ((y2 - y1) or 1e-12) + x1)
-        inside ^= crosses
-    pixels = image[min_y : max_y + 1, min_x : max_x + 1][inside]
-    if pixels.size == 0:
-        raise ValueError("polygon selected no pixels")
-    return pixels
+    return location_regions.extract_region(np, image, region)
 
 
 def _normalize_stats(stats: dict[str, Any], seconds: float) -> dict[str, Any]:
@@ -651,13 +627,7 @@ def _import_numpy() -> Any:
 
 
 def _jsonable_regions(regions: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    jsonable = []
-    for region in regions:
-        item = dict(region)
-        if "points" in item:
-            item["points"] = [{"x": float(x), "y": float(y)} for x, y in item["points"]]
-        jsonable.append(item)
-    return jsonable
+    return location_regions.jsonable_regions(regions)
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:

@@ -12,6 +12,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+import location_regions
+
 
 DEFAULT_CAMERA_MODEL = "Canon EOS R6 Mark III"
 DEFAULT_ISO = "100"
@@ -31,6 +33,8 @@ DEFAULT_AUTO_EXPOSURE_SATURATION_THRESHOLD = 65000
 DEFAULT_AUTO_EXPOSURE_SATURATED_STEP_EV = 7
 DEFAULT_MIN_SHUTTER_SPEED = "1/8000"
 DEFAULT_MAX_SHUTTER_SPEED = "30"
+METERING_MODE_FULL = "full"
+METERING_MODE_LOCATION = "location"
 
 CONFIG_ISO = "/main/imgsettings/iso"
 CONFIG_APERTURE = "/main/capturesettings/aperture"
@@ -96,7 +100,7 @@ class DecodeResult:
     stats: dict[str, Any]
 
     def to_jsonable(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "source_file": str(self.source_file),
             "output_files": [str(path) for path in self.output_files],
             "metadata_file": str(self.metadata_file),
@@ -110,6 +114,17 @@ class DecodeResult:
             "white_level": self.stats.get("white_level"),
             "camera_white_level_per_channel": self.stats.get("camera_white_level_per_channel"),
         }
+        if "metering" in self.stats:
+            metering = self.stats.get("metering", {})
+            data["metering"] = {
+                "mode": metering.get("mode"),
+                "region_count": metering.get("region_count"),
+                "pixel_count": _nested_stat(metering, "image", "pixel_count"),
+                "image_max": _nested_stat(metering, "image", "max"),
+                "image_channel_max": metering.get("image", {}).get("channel_max"),
+                "exposure_metric": _nested_stat(metering, "exposure", "channel_contrast_max"),
+            }
+        return data
 
 
 @dataclass(frozen=True)
@@ -375,6 +390,7 @@ def decode_raw_image(
     rawpy_module: Any | None = None,
     numpy_module: Any | None = None,
     tifffile_module: Any | None = None,
+    metering_regions: Sequence[dict[str, Any]] | None = None,
 ) -> DecodeResult:
     """Decode a RAW file to linear 16-bit camera-RGB outputs.
 
@@ -448,6 +464,15 @@ def decode_raw_image(
 
     stats["image"] = _array_stats(np, image)
     stats["exposure"] = _exposure_stats(np, image)
+    if metering_regions is not None:
+        metering_pixels = _extract_metering_pixels(np, image, metering_regions)
+        stats["metering"] = {
+            "mode": METERING_MODE_LOCATION,
+            "region_count": len(metering_regions),
+            "regions": location_regions.jsonable_regions(metering_regions),
+            "image": _array_stats(np, metering_pixels),
+            "exposure": _exposure_stats(np, metering_pixels),
+        }
     output_files: list[Path] = []
 
     if "npy" in normalized_formats:
@@ -499,6 +524,7 @@ def auto_expose_capture(
     shutter_speeds: Sequence[str] | None = None,
     decode_output_dir: str | Path | None = None,
     decode_formats: Sequence[str] = DEFAULT_DECODE_FORMATS,
+    metering_regions: Sequence[dict[str, Any]] | None = None,
     port: str | None = None,
     expected_model: str = DEFAULT_CAMERA_MODEL,
     allow_bulb: bool = False,
@@ -593,6 +619,7 @@ def auto_expose_capture(
                 target_max=target_max,
                 decode_output_dir=trial_decode_dir,
                 decode_formats=("npy",),
+                metering_regions=metering_regions,
                 allow_bulb=allow_bulb,
                 keep_on_camera=keep_on_camera,
                 runner=runner,
@@ -658,10 +685,12 @@ def auto_expose_capture(
             executable=executable,
             timeout=timeout,
         )
-        decoded = decoder(
+        decoded = _decode_with_metering(
+            decoder,
             final_result.saved_file,
             output_dir=decode_output_dir,
             formats=decode_formats,
+            metering_regions=metering_regions,
         )
         final_result = CaptureResult(
             connection=final_result.connection,
@@ -951,6 +980,7 @@ def _capture_decode_trial(
     target_max: int,
     decode_output_dir: Path,
     decode_formats: Sequence[str],
+    metering_regions: Sequence[dict[str, Any]] | None,
     allow_bulb: bool,
     keep_on_camera: bool,
     runner: Runner | None,
@@ -974,7 +1004,13 @@ def _capture_decode_trial(
             executable=executable,
             timeout=timeout,
         )
-        decoded = decoder(capture.saved_file, output_dir=decode_output_dir, formats=decode_formats)
+        decoded = _decode_with_metering(
+            decoder,
+            capture.saved_file,
+            output_dir=decode_output_dir,
+            formats=decode_formats,
+            metering_regions=metering_regions,
+        )
         decoded_max = _decoded_image_max(decoded)
         exposure_metric = _decoded_exposure_metric(decoded)
         return AutoExposureTrial(
@@ -1001,7 +1037,7 @@ def _capture_decode_trial(
 
 def _decoded_image_max(decoded: DecodeResult) -> int:
     try:
-        return int(decoded.stats["image"]["max"])
+        return int(_metering_stats_section(decoded, "image")["max"])
     except (KeyError, TypeError) as exc:
         raise GPhoto2Error("decoded result did not include image max statistics") from exc
 
@@ -1015,7 +1051,7 @@ def _decoded_raw_visible_max(decoded: DecodeResult) -> int | None:
 
 def _decoded_image_channel_max(decoded: DecodeResult) -> tuple[int, ...] | None:
     try:
-        values = decoded.stats["image"]["channel_max"]
+        values = _metering_stats_section(decoded, "image")["channel_max"]
     except (KeyError, TypeError):
         return None
     if values is None:
@@ -1025,7 +1061,7 @@ def _decoded_image_channel_max(decoded: DecodeResult) -> tuple[int, ...] | None:
 
 def _decoded_exposure_metric(decoded: DecodeResult) -> float | None:
     try:
-        return float(decoded.stats["exposure"]["channel_contrast_max"])
+        return float(_metering_stats_section(decoded, "exposure")["channel_contrast_max"])
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -1043,6 +1079,44 @@ def _auto_exposure_decision(
     if decoded_max <= target_max:
         return "accepted"
     return "ratio_reduce"
+
+
+def _decode_with_metering(
+    decoder: Decoder,
+    raw_file: str | Path,
+    *,
+    output_dir: str | Path | None,
+    formats: Sequence[str],
+    metering_regions: Sequence[dict[str, Any]] | None,
+) -> DecodeResult:
+    if metering_regions is None:
+        return decoder(raw_file, output_dir=output_dir, formats=formats)
+    return decoder(raw_file, output_dir=output_dir, formats=formats, metering_regions=metering_regions)
+
+
+def _metering_stats_section(decoded: DecodeResult, section: str) -> dict[str, Any]:
+    metering = decoded.stats.get("metering")
+    if isinstance(metering, dict) and isinstance(metering.get(section), dict):
+        return metering[section]
+    value = decoded.stats.get(section)
+    if not isinstance(value, dict):
+        raise KeyError(section)
+    return value
+
+
+def _extract_metering_pixels(np: Any, image: Any, regions: Sequence[dict[str, Any]]) -> Any:
+    if not regions:
+        raise GPhoto2Error("metering regions must not be empty")
+    pixels = [location_regions.extract_region(np, image, region) for region in regions]
+    flat = np.concatenate([item.reshape(-1, image.shape[-1]) for item in pixels], axis=0)
+    return flat.reshape(-1, 1, image.shape[-1])
+
+
+def load_metering_regions(path: Path) -> list[dict[str, Any]]:
+    regions = location_regions.load_location_regions(path, "all")
+    if len(regions) != 24:
+        raise GPhoto2Error(f"location metering requires exactly 24 blocks, got {len(regions)} from {path}")
+    return regions
 
 
 def _nested_stat(stats: dict[str, Any], section: str, key: str) -> int | float | None:
@@ -1117,6 +1191,7 @@ def _array_stats(np: Any, array: Any) -> dict[str, Any]:
     return {
         "shape": [int(value) for value in array.shape],
         "dtype": str(array.dtype),
+        "pixel_count": _array_pixel_count(array),
         "min": int(array.min()),
         "max": int(array.max()),
         "channel_min": _channel_stat(array, "min"),
@@ -1124,6 +1199,12 @@ def _array_stats(np: Any, array: Any) -> dict[str, Any]:
         "channel_mean": _channel_stat(array, "mean"),
         "percentiles": [float(value) for value in np.percentile(array, [0, 0.01, 0.1, 1, 50, 99, 99.9, 99.99, 100])],
     }
+
+
+def _array_pixel_count(array: Any) -> int:
+    if len(array.shape) >= 3:
+        return int(array.shape[0] * array.shape[1])
+    return int(array.size)
 
 
 def _exposure_stats(np: Any, image: Any) -> dict[str, Any]:
@@ -1256,6 +1337,17 @@ def main(argv: list[str] | None = None) -> int:
         dest="decode_formats",
         help="Final decoded output format. Repeat for multiple formats. Defaults to npy and tiff.",
     )
+    auto_parser.add_argument(
+        "--metering-mode",
+        choices=(METERING_MODE_FULL, METERING_MODE_LOCATION),
+        default=METERING_MODE_FULL,
+        help="Use the full decoded image or the 24 saved location quadrilaterals for auto-exposure metering.",
+    )
+    auto_parser.add_argument(
+        "--metering-location-config",
+        type=Path,
+        help="Location picker JSON used when --metering-mode=location.",
+    )
     auto_parser.add_argument("--keep", action="store_true", help="Keep the final captured file on the camera.")
 
     args = parser.parse_args(argv)
@@ -1309,6 +1401,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             _print_json(result.to_jsonable())
         elif args.command == "auto-expose":
+            metering_regions = None
+            if args.metering_mode == METERING_MODE_LOCATION:
+                if args.metering_location_config is None:
+                    raise GPhoto2Error("--metering-location-config is required when --metering-mode=location")
+                metering_regions = load_metering_regions(args.metering_location_config)
             result = auto_expose_capture(
                 output_dir=args.output_dir,
                 filename_template=args.filename_template,
@@ -1323,6 +1420,7 @@ def main(argv: list[str] | None = None) -> int:
                 shutter_speeds=args.shutter_speeds,
                 decode_output_dir=args.decode_output_dir,
                 decode_formats=args.decode_formats or DEFAULT_DECODE_FORMATS,
+                metering_regions=metering_regions,
                 port=args.port,
                 expected_model=args.model,
                 allow_bulb=False,

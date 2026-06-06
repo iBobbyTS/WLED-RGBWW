@@ -303,7 +303,17 @@ python3 camera_gphoto2.py auto-expose \
   --max-captures 10
 ```
 
-The auto-exposure routine keeps ISO and aperture fixed, starts from the current bounded shutter speed, and decodes each trial with the same linear camera-RGB path. It uses decoded image max as the hard safety limit, but uses the strongest per-channel high-percentile contrast (`p99.9 - p10`) as the exposure feedback so saturated HSI/RGB hues are not misclassified as dark just because the green channel is weak. Very dark measurements jump by a bounded EV step, saturated measurements retreat by a bounded EV step, and mixed safe/overexposed brackets are refined with a geometric midpoint. The final saved image must have all decoded channels at or below `target_max`; rejected final captures are deleted and retried with a safer shutter. Temporary trial captures are capped by `--max-trials` (`5` by default), and total shutter releases including rejected finals and the saved final are capped by `--max-captures` (`10` by default). Trial RAW and decoded files are written under the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are saved to the requested output directories. Final filenames are automatically numbered on retries so gphoto2 never prompts to overwrite an existing file.
+The auto-exposure routine keeps ISO and aperture fixed, starts from the current bounded shutter speed, and decodes each trial with the same linear camera-RGB path. It uses decoded metering max as the hard safety limit, but uses the strongest per-channel high-percentile contrast (`p99.9 - p10`) as the exposure feedback so saturated HSI/RGB hues are not misclassified as dark just because the green channel is weak. Very dark measurements jump by a bounded EV step, saturated measurements retreat by a bounded EV step, and mixed safe/overexposed brackets are refined with a geometric midpoint. The final saved image must have the selected metering pixels at or below `target_max`; rejected final captures are deleted and retried with a safer shutter. Temporary trial captures are capped by `--max-trials` (`5` by default), and total shutter releases including rejected finals and the saved final are capped by `--max-captures` (`10` by default). Trial RAW and decoded files are written under the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are saved to the requested output directories. Final filenames are automatically numbered on retries so gphoto2 never prompts to overwrite an existing file. Auto exposure supports two metering modes without changing the exposure step algorithm: `--metering-mode full` keeps the original full-image max/contrast behavior, while `--metering-mode location --metering-location-config <json>` loads a saved location-picker JSON and computes max/contrast only from the 24 color-chart quadrilaterals. The full decoded image is still saved; the location mode only changes the statistics used to choose shutter speed. Location-metering decode sidecars include an additional `metering` section with the selected region count, pixel count, max values, and exposure contrast.
+
+Example location-metered auto exposure:
+
+```bash
+.venv/bin/python camera_gphoto2.py auto-expose \
+  --output-dir captures/camera \
+  --decode-output-dir captures/decoded \
+  --metering-mode location \
+  --metering-location-config /Users/ibobby/Projects/WLED-RGBWW/config/location/locations-20260605-225800.json
+```
 
 Validation on 2026-06-05 used Ray120c CCT states `(0%, 0.1%, 1%, 10%, 50%, 100%) x (1800K, 5600K, 20000K)` plus HSI `100%` saturation at hues `0, 60, 120, 180, 240, 300`, from both underexposed (`1/8000`) and overexposed (`1s`) starts. The final report at `tmp/ae-ray120c-probe/20260605-184035/report.json` covered `48` auto-exposure runs with no errors, no final image/channel max above `49152`, maximum final channel value `48614`, and no run exceeding `10` shutter releases.
 
@@ -334,6 +344,13 @@ For a real high-output sweep, pass `--allow-high-output` only after confirming t
 ```
 
 If no `--roi` or `--location-config` is provided, the script measures the full decoded image. For patch-based measurements, prefer a saved location-picker config. Use `--roi x,y,width,height` for simple rectangular regions.
+
+The measurement regions above control the final response statistics. Separately, the auto-exposure step can be told to meter only the saved 24 chart patches by adding:
+
+```bash
+--auto-exposure-metering-mode location \
+--auto-exposure-metering-location-config config/location/locations-YYYYMMDD-HHMMSS.json
+```
 
 Each JSON measurement records:
 

@@ -1102,6 +1102,11 @@ class LocationPickerState:
     def _auto_exposure_worker(self) -> None:
         try:
             run_dir = LOCATION_TMP_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
+            metering_regions = None
+            if self.args.metering_mode == camera_gphoto2.METERING_MODE_LOCATION:
+                if self.args.metering_location_config is None:
+                    raise RuntimeError("--metering-location-config is required when --metering-mode=location")
+                metering_regions = camera_gphoto2.load_metering_regions(self.args.metering_location_config)
             result = camera_gphoto2.auto_expose_capture(
                 output_dir=run_dir / "camera",
                 filename_template="%Y%m%d-%H%M%S-location.%C",
@@ -1114,6 +1119,7 @@ class LocationPickerState:
                 max_trials=self.args.max_exposure_trials,
                 decode_output_dir=run_dir / "decoded",
                 decode_formats=("npy",),
+                metering_regions=metering_regions,
                 port=self.args.camera_port,
                 expected_model=self.args.model,
                 executable=self.args.gphoto2,
@@ -2116,6 +2122,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-shutter-speed", default=DEFAULT_MIN_SHUTTER_SPEED)
     parser.add_argument("--max-shutter-speed", default=DEFAULT_MAX_SHUTTER_SPEED)
     parser.add_argument("--max-exposure-trials", type=int, default=DEFAULT_MAX_EXPOSURE_TRIALS)
+    parser.add_argument(
+        "--metering-mode",
+        choices=(camera_gphoto2.METERING_MODE_FULL, camera_gphoto2.METERING_MODE_LOCATION),
+        default=camera_gphoto2.METERING_MODE_FULL,
+        help="Use the full decoded image or a saved 24-block location config for auto-exposure metering.",
+    )
+    parser.add_argument("--metering-location-config", type=Path, help="Location picker JSON used by location metering.")
     parser.add_argument("--model", default=camera_gphoto2.DEFAULT_CAMERA_MODEL)
     parser.add_argument("--port", dest="camera_port", help="Camera USB port passed to gphoto2.")
     parser.add_argument("--camera-port", dest="camera_port", help="Camera USB port passed to gphoto2.")
