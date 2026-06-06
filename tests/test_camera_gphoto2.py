@@ -676,6 +676,71 @@ class CameraGPhoto2AutoExposureTests(unittest.TestCase):
         self.assertEqual(result.trials[0].decision, "dark_boost")
         self.assertLessEqual(result.final_capture.decoded.stats["image"]["max"], 49152)
 
+    def test_auto_expose_can_start_from_explicit_initial_shutter(self):
+        current_shutter = {"value": "30"}
+        trial_shutters = []
+        max_by_shutter = {
+            "1/8000": 1000,
+            "1/1000": 8000,
+            "1/125": 48000,
+            "30": 65000,
+        }
+
+        def runner(args):
+            if args == ["--auto-detect"]:
+                return camera_gphoto2.CommandOutput(
+                    "Model                          Port\n"
+                    "----------------------------------------------------------\n"
+                    "Canon EOS R6 Mark III          usb:001,010\n"
+                )
+            if "--set-config" in args:
+                for value in args:
+                    if value.startswith(f"{camera_gphoto2.CONFIG_SHUTTER_SPEED}="):
+                        current_shutter["value"] = value.split("=", 1)[1]
+                return camera_gphoto2.CommandOutput("")
+            if args == ["--port", "usb:001,010", "--get-config", camera_gphoto2.CONFIG_SHUTTER_SPEED]:
+                return camera_gphoto2.CommandOutput(f"Label: Shutter Speed\nCurrent: {current_shutter['value']}\nEND\n")
+            if "--capture-image-and-download" in args:
+                filename = Path(args[args.index("--filename") + 1])
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                filename.write_text(current_shutter["value"], encoding="utf-8")
+                if filename.name.startswith("trial-"):
+                    trial_shutters.append(current_shutter["value"])
+                return camera_gphoto2.CommandOutput(f"Saving file as {filename}\n")
+            raise AssertionError(args)
+
+        def decoder(raw_file, *, output_dir=None, formats=("npy",)):
+            raw_path = Path(raw_file)
+            shutter = raw_path.read_text(encoding="utf-8")
+            target_dir = Path(output_dir) if output_dir is not None else raw_path.parent
+            target_dir.mkdir(parents=True, exist_ok=True)
+            output_file = target_dir / f"{raw_path.stem}.json"
+            output_file.write_text("{}", encoding="utf-8")
+            return camera_gphoto2.DecodeResult(
+                source_file=raw_path,
+                output_files=(output_file,),
+                metadata_file=output_file,
+                image_shape=(2, 2, 3),
+                image_dtype="uint16",
+                stats={"image": {"max": max_by_shutter[shutter]}, "raw_visible": {"max": max_by_shutter[shutter]}},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            camera_gphoto2.auto_expose_capture(
+                output_dir=Path(tmpdir) / "final",
+                filename_template="final.cr3",
+                target_max=49152,
+                max_trials=2,
+                shutter_speeds=("1/8000", "1/1000", "1/125", "30"),
+                initial_shutter_speed="1/8000",
+                decode_output_dir=Path(tmpdir) / "decoded",
+                decode_formats=("npy",),
+                runner=runner,
+                decoder=decoder,
+            )
+
+        self.assertEqual(trial_shutters[0], "1/8000")
+
     def test_auto_expose_uses_saturated_backoff_from_overexposure(self):
         current_shutter = {"value": "1"}
         trial_shutters = []

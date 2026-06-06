@@ -38,3 +38,4 @@
 - Do not commit, push, or create pull requests unless explicitly requested.
 - Do not send destructive or high-brightness device-control sweeps without an explicit bounded range and a clear recovery path.
 - When testing WLED channel output, keep initial PWM values low and ramp only after confirming channel order and thermal behavior.
+- All scripts that can leave the WLED/ESPHome fixture on must explicitly turn the light off before exiting; dedicated light-on/control scripts are the only exception.

@@ -16,39 +16,46 @@ import location_regions
 PROJECT_ROOT = Path(__file__).resolve().parent
 PROJECT_TMP_DIR = PROJECT_ROOT / "tmp"
 DEFAULT_OUTPUT_ROOT = PROJECT_TMP_DIR / "channel-response"
+DEFAULT_AUTO_EXPOSURE_METERING_LOCATION_CONFIG = PROJECT_ROOT / "config" / "location" / "locations-20260605-225800.json"
 DEFAULT_CODE_VALUES = (
-    1,
-    2,
-    3,
-    4,
-    6,
-    8,
-    12,
-    16,
-    24,
-    32,
-    48,
-    64,
-    96,
-    128,
-    192,
-    256,
-    384,
-    512,
-    768,
-    1024,
-    1536,
-    2048,
-    3072,
     4095,
+    3072,
+    2048,
+    1536,
+    1024,
+    768,
+    512,
+    384,
+    256,
+    192,
+    128,
+    96,
+    64,
+    48,
+    32,
+    24,
+    16,
+    12,
+    8,
+    6,
+    4,
+    3,
+    2,
+    1,
 )
 DEFAULT_CHANNELS = ("cw", "ww", "r", "g", "b")
 DEFAULT_SAFE_CODE_LIMIT = 1024
 DEFAULT_SETTLE_SECONDS = 0.5
 DEFAULT_DECODE_FORMATS = ("npy",)
+DEFAULT_AMBIENT_ISO = "100"
+DEFAULT_AMBIENT_SHUTTER_SPEED = "30"
+DEFAULT_AMBIENT_TIMEOUT = 120.0
+DEFAULT_AMBIENT_STOP_THRESHOLD_PER_SECOND = 2.0
 
 LightFn = Callable[..., dict[str, int]]
 AutoExposeFn = Callable[..., camera_gphoto2.AutoExposureResult]
+CaptureFn = Callable[..., camera_gphoto2.CaptureResult]
+DecoderFn = Callable[..., camera_gphoto2.DecodeResult]
 
 
 def parse_code_values(value: str) -> tuple[int, ...]:
@@ -275,6 +282,40 @@ def measure_image_regions(
     return measurements
 
 
+def max_ambient_subtracted_mean_per_second(region_measurements: Sequence[dict[str, Any]]) -> float | None:
+    values: list[float] = []
+    for measurement in region_measurements:
+        ambient_subtracted = measurement.get("ambient_subtracted")
+        if not isinstance(ambient_subtracted, dict):
+            continue
+        channel_values = ambient_subtracted.get("channel_mean_per_second")
+        if not isinstance(channel_values, (list, tuple)):
+            continue
+        values.extend(max(0.0, float(value)) for value in channel_values)
+    if not values:
+        return None
+    return max(values)
+
+
+def should_stop_channel_at_ambient(
+    *,
+    shutter_speed: str,
+    max_shutter_speed: str,
+    region_measurements: Sequence[dict[str, Any]],
+    threshold_per_second: float,
+) -> bool:
+    if threshold_per_second < 0:
+        return False
+    try:
+        at_max_shutter = shutter_seconds(shutter_speed) >= shutter_seconds(max_shutter_speed)
+    except ValueError:
+        return False
+    if not at_max_shutter:
+        return False
+    signal = max_ambient_subtracted_mean_per_second(region_measurements)
+    return signal is not None and signal <= threshold_per_second
+
+
 def run_channel_response(
     *,
     output_root: Path,
@@ -298,9 +339,14 @@ def run_channel_response(
     max_captures: int,
     decode_formats: Sequence[str],
     auto_exposure_metering_regions: Sequence[dict[str, Any]] | None = None,
+    ambient_iso: str = DEFAULT_AMBIENT_ISO,
+    ambient_shutter_speed: str = DEFAULT_AMBIENT_SHUTTER_SPEED,
+    ambient_stop_threshold_per_second: float = DEFAULT_AMBIENT_STOP_THRESHOLD_PER_SECOND,
     output_json: Path | None = None,
     light_fn: LightFn = esphome.light,
     auto_expose_fn: AutoExposeFn = camera_gphoto2.auto_expose_capture,
+    capture_fn: CaptureFn = camera_gphoto2.capture_image,
+    decoder_fn: DecoderFn = camera_gphoto2.decode_raw_image,
 ) -> Path:
     plan = build_measurement_plan(channels=channels, codes=codes, max_code=max_code)
     validate_output_range(
@@ -336,10 +382,12 @@ def run_channel_response(
             "allow_high_output": bool(allow_high_output),
             "settle_seconds": float(settle_seconds),
             "include_ambient": bool(include_ambient),
+            "ambient_stop_threshold_per_second": float(ambient_stop_threshold_per_second),
             "regions": _jsonable_regions(regions),
             "notes": [
                 "Signal values are decoded linear camera RGB and normalized by shutter seconds.",
                 "Ray120c is not part of this measurement; this records the WLED channel response only.",
+                "Codes are measured from high to low; once a channel is ambient-limited at the longest shutter, lower codes are skipped.",
             ],
         },
         "camera": {
@@ -352,6 +400,11 @@ def run_channel_response(
             "max_trials": int(max_trials),
             "max_captures": int(max_captures),
             "decode_formats": list(decode_formats),
+            "ambient": {
+                "iso": str(ambient_iso),
+                "shutter_speed": str(ambient_shutter_speed),
+                "mode": "fixed",
+            },
             "auto_exposure_metering": {
                 "mode": camera_gphoto2.METERING_MODE_LOCATION if auto_exposure_metering_regions is not None else camera_gphoto2.METERING_MODE_FULL,
                 "regions": _jsonable_regions(auto_exposure_metering_regions) if auto_exposure_metering_regions is not None else None,
@@ -360,6 +413,7 @@ def run_channel_response(
         "plan": plan,
         "ambient": None,
         "measurements": [],
+        "skipped_measurements": [],
         "status": "planned" if dry_run else "running",
     }
     _write_json(output_json, result)
@@ -374,24 +428,21 @@ def run_channel_response(
         light_fn(*light_args({"cw": 0, "ww": 0, "r": 0, "g": 0, "b": 0}))
         time.sleep(max(0.0, settle_seconds))
         if include_ambient:
-            ambient_capture = _capture_auto_exposed(
-                auto_expose_fn=auto_expose_fn,
+            ambient_capture = _capture_fixed(
+                capture_fn=capture_fn,
+                decoder_fn=decoder_fn,
                 camera_dir=camera_dir,
                 decode_dir=decode_dir,
                 filename_template="ambient.%C",
-                target_max=target_max,
-                iso=iso,
+                iso=ambient_iso,
                 aperture=aperture,
                 image_format=image_format,
-                min_shutter_speed=min_shutter_speed,
-                max_shutter_speed=max_shutter_speed,
-                max_trials=max_trials,
-                max_captures=max_captures,
+                shutter_speed=ambient_shutter_speed,
                 decode_formats=decode_formats,
                 metering_regions=auto_exposure_metering_regions,
             )
-            ambient_shutter_seconds = shutter_seconds(ambient_capture.final_capture.settings.shutter_speed)
-            ambient_image = _load_npy(find_npy_output(ambient_capture.final_capture))
+            ambient_shutter_seconds = shutter_seconds(ambient_capture.settings.shutter_speed)
+            ambient_image = _load_npy(find_npy_output(ambient_capture))
             ambient_regions = measure_image_regions(
                 ambient_image,
                 regions,
@@ -402,13 +453,21 @@ def run_channel_response(
                 for region in ambient_regions
             }
             result["ambient"] = {
-                "auto_exposure": ambient_capture.to_jsonable(),
+                "capture": ambient_capture.to_jsonable(),
                 "shutter_seconds": ambient_shutter_seconds,
                 "regions": ambient_regions,
             }
             _write_json(output_json, result)
 
+        stopped_channels: dict[str, dict[str, Any]] = {}
+        started_channels: set[str] = set()
         for step in plan:
+            if step["channel"] in stopped_channels:
+                result["skipped_measurements"].append({**step, "skip_reason": stopped_channels[step["channel"]]})
+                _write_json(output_json, result)
+                continue
+            first_channel_measurement = step["channel"] not in started_channels
+            started_channels.add(step["channel"])
             command = step["command"]
             light_fn(*light_args(command))
             time.sleep(max(0.0, settle_seconds))
@@ -427,6 +486,7 @@ def run_channel_response(
                 max_captures=max_captures,
                 decode_formats=decode_formats,
                 metering_regions=auto_exposure_metering_regions,
+                initial_shutter_speed=min_shutter_speed if first_channel_measurement else None,
             )
             seconds = shutter_seconds(capture.final_capture.settings.shutter_speed)
             image = _load_npy(find_npy_output(capture.final_capture))
@@ -437,11 +497,30 @@ def run_channel_response(
                 ambient_regions=ambient_stats_by_region,
                 ambient_shutter_seconds=ambient_shutter_seconds,
             )
+            ambient_subtracted_signal = max_ambient_subtracted_mean_per_second(region_measurements)
+            stop_at_ambient = should_stop_channel_at_ambient(
+                shutter_speed=capture.final_capture.settings.shutter_speed,
+                max_shutter_speed=max_shutter_speed,
+                region_measurements=region_measurements,
+                threshold_per_second=ambient_stop_threshold_per_second,
+            )
+            stop_reason = None
+            if stop_at_ambient:
+                stop_reason = {
+                    "kind": "ambient_limited",
+                    "at_code": int(step["code"]),
+                    "max_shutter_speed": str(max_shutter_speed),
+                    "threshold_per_second": float(ambient_stop_threshold_per_second),
+                    "max_ambient_subtracted_mean_per_second": ambient_subtracted_signal,
+                }
+                stopped_channels[step["channel"]] = stop_reason
             result["measurements"].append(
                 {
                     **step,
                     "auto_exposure": capture.to_jsonable(),
                     "shutter_seconds": seconds,
+                    "max_ambient_subtracted_mean_per_second": ambient_subtracted_signal,
+                    "stop_reason": stop_reason,
                     "regions": region_measurements,
                 }
             )
@@ -484,7 +563,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--auto-exposure-metering-mode",
         choices=(camera_gphoto2.METERING_MODE_FULL, camera_gphoto2.METERING_MODE_LOCATION),
-        default=camera_gphoto2.METERING_MODE_FULL,
+        default=camera_gphoto2.METERING_MODE_LOCATION,
         help="Use the full decoded image or a saved 24-block location config for auto-exposure metering.",
     )
     parser.add_argument(
@@ -497,6 +576,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--iso", default=camera_gphoto2.DEFAULT_ISO)
     parser.add_argument("--aperture", default=camera_gphoto2.DEFAULT_APERTURE)
     parser.add_argument("--image-format", default=camera_gphoto2.DEFAULT_IMAGE_FORMAT)
+    parser.add_argument("--ambient-iso", default=DEFAULT_AMBIENT_ISO)
+    parser.add_argument("--ambient-shutter-speed", default=DEFAULT_AMBIENT_SHUTTER_SPEED)
+    parser.add_argument(
+        "--ambient-stop-threshold-per-second",
+        type=float,
+        default=DEFAULT_AMBIENT_STOP_THRESHOLD_PER_SECOND,
+        help="Stop lower codes for a channel when the longest-exposure ambient-subtracted signal is at or below this value.",
+    )
     parser.add_argument("--min-shutter-speed", default=camera_gphoto2.DEFAULT_MIN_SHUTTER_SPEED)
     parser.add_argument("--max-shutter-speed", default=camera_gphoto2.DEFAULT_MAX_SHUTTER_SPEED)
     parser.add_argument("--max-trials", type=int, default=camera_gphoto2.DEFAULT_AUTO_EXPOSURE_MAX_TRIALS)
@@ -504,6 +591,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--decode-format", dest="decode_formats", action="append")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
+
+
+def resolve_auto_exposure_metering_location_config(args: argparse.Namespace) -> Path | None:
+    if args.auto_exposure_metering_mode != camera_gphoto2.METERING_MODE_LOCATION:
+        return None
+    return (
+        args.auto_exposure_metering_location_config
+        or args.location_config
+        or DEFAULT_AUTO_EXPOSURE_METERING_LOCATION_CONFIG
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -514,10 +611,9 @@ def main(argv: list[str] | None = None) -> int:
         block_indices=args.block_indices,
     )
     auto_exposure_metering_regions = None
-    if args.auto_exposure_metering_mode == camera_gphoto2.METERING_MODE_LOCATION:
-        if args.auto_exposure_metering_location_config is None:
-            raise ValueError("--auto-exposure-metering-location-config is required when --auto-exposure-metering-mode=location")
-        auto_exposure_metering_regions = camera_gphoto2.load_metering_regions(args.auto_exposure_metering_location_config)
+    auto_exposure_metering_location_config = resolve_auto_exposure_metering_location_config(args)
+    if auto_exposure_metering_location_config is not None:
+        auto_exposure_metering_regions = camera_gphoto2.load_metering_regions(auto_exposure_metering_location_config)
     output_json = run_channel_response(
         output_root=args.output_dir,
         run_name=args.run_name,
@@ -540,6 +636,9 @@ def main(argv: list[str] | None = None) -> int:
         max_captures=args.max_captures,
         decode_formats=tuple(args.decode_formats or DEFAULT_DECODE_FORMATS),
         auto_exposure_metering_regions=auto_exposure_metering_regions,
+        ambient_iso=args.ambient_iso,
+        ambient_shutter_speed=args.ambient_shutter_speed,
+        ambient_stop_threshold_per_second=args.ambient_stop_threshold_per_second,
         output_json=args.output_json,
     )
     print(output_json)
@@ -562,6 +661,7 @@ def _capture_auto_exposed(
     max_captures: int,
     decode_formats: Sequence[str],
     metering_regions: Sequence[dict[str, Any]] | None = None,
+    initial_shutter_speed: str | None = None,
 ) -> camera_gphoto2.AutoExposureResult:
     return auto_expose_fn(
         output_dir=camera_dir,
@@ -574,9 +674,48 @@ def _capture_auto_exposed(
         max_shutter_speed=max_shutter_speed,
         max_trials=max_trials,
         max_captures=max_captures,
+        initial_shutter_speed=initial_shutter_speed,
         decode_output_dir=decode_dir,
         decode_formats=decode_formats,
         metering_regions=metering_regions,
+    )
+
+
+def _capture_fixed(
+    *,
+    capture_fn: CaptureFn,
+    decoder_fn: DecoderFn,
+    camera_dir: Path,
+    decode_dir: Path,
+    filename_template: str,
+    iso: str,
+    aperture: str,
+    image_format: str,
+    shutter_speed: str,
+    decode_formats: Sequence[str],
+    metering_regions: Sequence[dict[str, Any]] | None = None,
+) -> camera_gphoto2.CaptureResult:
+    capture = capture_fn(
+        output_dir=camera_dir,
+        filename_template=filename_template,
+        settings=camera_gphoto2.CaptureSettings(
+            iso=iso,
+            aperture=aperture,
+            shutter_speed=shutter_speed,
+            image_format=image_format,
+        ),
+        timeout=DEFAULT_AMBIENT_TIMEOUT,
+    )
+    if metering_regions is None:
+        decoded = decoder_fn(capture.saved_file, output_dir=decode_dir, formats=decode_formats)
+    else:
+        decoded = decoder_fn(capture.saved_file, output_dir=decode_dir, formats=decode_formats, metering_regions=metering_regions)
+    return camera_gphoto2.CaptureResult(
+        connection=capture.connection,
+        settings=capture.settings,
+        saved_file=capture.saved_file,
+        stdout=capture.stdout,
+        decoded=decoded,
     )
 
 

@@ -321,14 +321,15 @@ Validation on 2026-06-05 used Ray120c CCT states `(0%, 0.1%, 1%, 10%, 50%, 100%)
 
 Use `measure_channel_response.py` to measure the WLED strip's per-channel code/duty to camera-linear response before Ray120c matching. Ray120c is not part of this measurement; the goal is to characterize the five WLED channels with the fixed Canon RAW linear pipeline.
 
-The script turns on one channel at a time, runs the existing bounded auto-exposure capture for each code, decodes the RAW image to `.npy`, computes region statistics, normalizes signal by shutter seconds, and writes an incremental JSON report under `tmp/channel-response/`. It starts and ends with `all_off`, and can optionally capture an all-off ambient frame and subtract its normalized signal from each measurement.
+The script turns on one channel at a time, runs the existing bounded auto-exposure capture for each code, decodes the RAW image to `.npy`, computes region statistics, normalizes signal by shutter seconds, and writes an incremental JSON report under `tmp/channel-response/`. It starts and ends with `all_off`. By default it first captures an all-off ambient frame at fixed `ISO 100`, `30s`, the configured aperture, and RAW format, then subtracts that normalized ambient signal from each measurement. The CLI meters auto exposure from the saved 24-patch chart config at `config/location/locations-20260605-225800.json` instead of the full frame.
+
+Default code order is high to low, starting at `4095`. Each channel is measured downward until the final auto-exposed capture is already at the longest shutter and the ambient-subtracted per-second signal is at or below `--ambient-stop-threshold-per-second` (`2.0` by default). At that point lower codes for that channel are skipped and recorded in `skipped_measurements`.
 
 First inspect the planned sweep without touching hardware:
 
 ```bash
 .venv/bin/python measure_channel_response.py \
   --channels cw,ww,r,g,b \
-  --codes "1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4095" \
   --dry-run
 ```
 
@@ -337,19 +338,17 @@ For a real high-output sweep, pass `--allow-high-output` only after confirming t
 ```bash
 .venv/bin/python measure_channel_response.py \
   --channels cw,ww,r,g,b \
-  --codes "1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4095" \
   --location-config config/location/locations-YYYYMMDD-HHMMSS.json \
   --block-indices all \
   --allow-high-output
 ```
 
-If no `--roi` or `--location-config` is provided, the script measures the full decoded image. For patch-based measurements, prefer a saved location-picker config. Use `--roi x,y,width,height` for simple rectangular regions.
+If no `--roi` or `--location-config` is provided, the script measures the full decoded image for final response statistics. For patch-based measurements, prefer a saved location-picker config. Use `--roi x,y,width,height` for simple rectangular regions.
 
-The measurement regions above control the final response statistics. Separately, the auto-exposure step can be told to meter only the saved 24 chart patches by adding:
+The measurement regions above control the final response statistics. Separately, the CLI auto-exposure step now defaults to metering only the saved 24 chart patches. Passing `--location-config <json>` also becomes the default metering config for that run; pass `--auto-exposure-metering-location-config <json>` only when measurement and exposure metering should use different location files. To force legacy full-frame auto-exposure metering, add:
 
 ```bash
---auto-exposure-metering-mode location \
---auto-exposure-metering-location-config config/location/locations-YYYYMMDD-HHMMSS.json
+--auto-exposure-metering-mode full
 ```
 
 Each JSON measurement records:
@@ -357,6 +356,7 @@ Each JSON measurement records:
 - channel, code, duty, and the exact ESPHome command vector
 - final auto-exposure result and shutter speed
 - `shutter_seconds`
+- `max_ambient_subtracted_mean_per_second` and any channel stop reason
 - per-region raw stats from decoded linear camera RGB
 - per-region `channel_mean_per_second` and `channel_median_per_second`
 - optional ambient-subtracted normalized channel means

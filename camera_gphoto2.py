@@ -522,6 +522,7 @@ def auto_expose_capture(
     max_trials: int = DEFAULT_AUTO_EXPOSURE_MAX_TRIALS,
     max_captures: int = DEFAULT_AUTO_EXPOSURE_MAX_CAPTURES,
     shutter_speeds: Sequence[str] | None = None,
+    initial_shutter_speed: str | None = None,
     decode_output_dir: str | Path | None = None,
     decode_formats: Sequence[str] = DEFAULT_DECODE_FORMATS,
     metering_regions: Sequence[dict[str, Any]] | None = None,
@@ -587,7 +588,7 @@ def auto_expose_capture(
 
     candidate_seconds = tuple(_parse_shutter_seconds(candidate) for candidate in candidates)
     try:
-        current_seconds = _parse_shutter_seconds(current_shutter)
+        current_seconds = _parse_shutter_seconds(initial_shutter_speed or current_shutter)
     except GPhoto2Error:
         current_seconds = _parse_shutter_seconds(DEFAULT_SHUTTER_SPEED)
 
