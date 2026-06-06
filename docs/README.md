@@ -194,15 +194,19 @@ light(cw, ww, r, g, b)
 
 The function maps call order `cw, ww, r, g, b` to ESPHome service arguments
 `cold_white, warm_white, red, green, blue`. Each value is converted with
-`int()` and is not range-clamped by the script. If all converted values are
-zero, it calls the ESPHome `all_off` action instead of
-`set_rgbww_12bit`.
+`int()`. If `config/channel/code-duty-curve.json` exists, values are treated as
+desired linear brightness codes and mapped through the measured code-duty curve
+before sending PWM codes to ESPHome. If the curve file does not exist, the
+wrapper keeps direct pass-through behavior and does not range-clamp values. If
+all converted output values are zero, it calls the ESPHome `all_off` action
+instead of `set_rgbww_12bit`.
 
 Command-line use:
 
 ```bash
 .venv/bin/python esphome.py 0 0 2048 0 0
 .venv/bin/python esphome.py 0 0 0 0 0
+.venv/bin/python esphome.py 2048 0 0 0 0 --no-curve
 ```
 
 Local validation:
@@ -344,6 +348,18 @@ For a real high-output sweep, pass `--allow-high-output` only after confirming t
 ```
 
 If no `--roi` or `--location-config` is provided, the script measures the full decoded image for final response statistics. For patch-based measurements, prefer a saved location-picker config. Use `--roi x,y,width,height` for simple rectangular regions.
+
+Generate the compact code-duty curve used by `esphome.py`:
+
+```bash
+.venv/bin/python generate_channel_curve.py \
+  --input tmp/channel-response/merged/channel-code-duty-response-merged.json \
+  --output config/channel/code-duty-curve.json
+```
+
+The generated curve maps desired linear brightness codes to measured PWM codes
+per channel. The full merged response JSON remains the measurement archive for
+later color modeling, but code-duty correction only needs this small curve file.
 
 The measurement regions above control the final response statistics. Separately, the CLI auto-exposure step now defaults to metering only the saved 24 chart patches. Passing `--location-config <json>` also becomes the default metering config for that run; pass `--auto-exposure-metering-location-config <json>` only when measurement and exposure metering should use different location files. To force legacy full-frame auto-exposure metering, add:
 

@@ -127,6 +127,10 @@ def light_args(command: dict[str, int]) -> tuple[int, int, int, int, int]:
     return (command["cw"], command["ww"], command["r"], command["g"], command["b"])
 
 
+def raw_light(cw: int, ww: int, r: int, g: int, b: int) -> dict[str, int]:
+    return esphome.light(cw, ww, r, g, b, curve_path=None)
+
+
 def build_measurement_plan(
     *,
     channels: Sequence[str],
@@ -338,7 +342,7 @@ def run_channel_response(
     ambient_shutter_speed: str = DEFAULT_AMBIENT_SHUTTER_SPEED,
     ambient_stop_threshold_per_second: float = DEFAULT_AMBIENT_STOP_THRESHOLD_PER_SECOND,
     output_json: Path | None = None,
-    light_fn: LightFn = esphome.light,
+    light_fn: LightFn = raw_light,
     auto_expose_fn: AutoExposeFn = camera_gphoto2.auto_expose_capture,
     capture_fn: CaptureFn = camera_gphoto2.capture_image,
     decoder_fn: DecoderFn = camera_gphoto2.decode_raw_image,

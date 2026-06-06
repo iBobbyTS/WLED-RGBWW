@@ -93,6 +93,23 @@ class MeasureChannelResponseParseTests(unittest.TestCase):
         self.assertEqual(args.codes[0], 4095)
         self.assertEqual(args.codes[-1], 8)
 
+    def test_raw_light_disables_code_duty_curve(self):
+        calls = []
+        original_light = measure_channel_response.esphome.light
+
+        def fake_light(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"cold_white": args[0], "warm_white": args[1], "red": args[2], "green": args[3], "blue": args[4]}
+
+        try:
+            measure_channel_response.esphome.light = fake_light
+            payload = measure_channel_response.raw_light(1, 2, 3, 4, 5)
+        finally:
+            measure_channel_response.esphome.light = original_light
+
+        self.assertEqual(payload["cold_white"], 1)
+        self.assertEqual(calls[0][1]["curve_path"], None)
+
 
 class MeasureChannelResponseRegionTests(unittest.TestCase):
     def test_roi_measurement_normalizes_by_shutter_seconds_and_subtracts_ambient(self):
