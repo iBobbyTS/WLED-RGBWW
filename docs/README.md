@@ -460,6 +460,14 @@ The white-mode target is to match the Ray120c at 100% brightness across:
 - CCT: `1800K` to `20000K`
 - G/M offset: `-1.0` to `+1.0`
 
+Recommended initial CCT/G-M LUT grid:
+
+- CCT points: `1800, 2000, 2300, 2700, 3200, 3800, 4500, 5000, 5600, 6500, 8000, 10000, 14000, 20000`
+- G/M raw points: `0, 70, 100, 130, 200`
+- Total initial grid: `14 x 5 = 70` Ray120c target points
+
+Use this as the first calibration grid, then add points only where interpolation or WLED matching error is high. CCT spacing should roughly follow mired spacing (`1e6 / K`) rather than equal Kelvin spacing, while preserving common photography points such as `5000K`, `5600K`, and `6500K`. Do not start with the full `19 x 7` grid unless the first pass shows that the extra G/M points (`40`, `160`) or dense high-CCT points materially reduce error.
+
 Recommended direction:
 
 - Measure Ray120c target outputs on a CCT/G-M grid.
@@ -469,6 +477,21 @@ Recommended direction:
 ## Color Mode Strategy Decision
 
 Use a model-first approach as the main path, then add a sparse LUT/residual correction layer for Ray120c HSL/RGB modes where the reference light's internal algorithm behaves nonlinearly or discontinuously. Treat Ray120c RGB as a black-box command mode, not as simple three-channel additive RGB.
+
+The initial color-mode direction is provisional. If the CCT/G-M calibration work shows a better camera-observed model, channel basis model, solver structure, or residual-correction method, replace this color-mode plan with the method supported by those measurements.
+
+Recommended structure:
+
+1. Build a Ray120c target model: map Ray120c commands to measured 24-patch camera-RGB responses.
+2. Build a WLED inverse model: map WLED RGBWW channel codes to predicted 24-patch camera-RGB responses, using the measured channel response curves and channel basis responses.
+3. Solve WLED RGBWW channel vectors that best match each Ray120c target while respecting channel limits, clipping, brightness, smoothness, and optional white-channel/RGB-channel usage penalties.
+4. Add a sparse residual LUT only after real WLED captures show systematic model error in specific RGB or HSI regions.
+
+For Ray120c RGB mode, treat `(r, g, b, intensity)` as a black-box 3D/4D target command space. A first target grid should include the gray axis, RGB/CMY edges, and a sparse RGB cube such as `0, 64, 128, 192, 255` per channel at fixed intensity. Start with `100%` intensity; add intensity levels such as `10%, 25%, 50%, 100%` only after the RGB color model is stable.
+
+For Ray120c HSI/HSL mode, model the command space with circular hue features such as `sin(hue)` and `cos(hue)`, plus saturation and intensity. A first target grid should use hue every `30 degrees`, saturation `0, 10, 25, 50, 75, 100`, and fixed `100%` intensity. Because `sat=0` should ideally ignore hue, measure a few hue values at `sat=0` first; if Ray120c output is stable there, store one neutral sample rather than duplicating all hues. Add local hue or saturation points only where measured residuals justify them.
+
+The WLED side should not start as a direct Ray command to WLED code LUT. The dimensionality is too high and interpolation near gamut boundaries will be fragile. Prefer a shared inverse solver for CCT/G-M, RGB, and HSI targets, then use residual LUTs as localized corrections rather than the primary representation.
 
 Reasoning:
 

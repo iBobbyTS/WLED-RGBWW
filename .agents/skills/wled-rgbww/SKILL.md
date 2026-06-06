@@ -37,6 +37,7 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 ## Calibration Direction
 
 - White mode should match Ray120c 100% brightness across `1800K` to `20000K` CCT and `-1.0` to `+1.0` G/M offset.
+- Use the first-pass CCT/G-M LUT grid from `docs/README.md`: CCT `1800, 2000, 2300, 2700, 3200, 3800, 4500, 5000, 5600, 6500, 8000, 10000, 14000, 20000` and raw G/M `0, 70, 100, 130, 200` (`70` points). Add denser G/M or high-CCT points only when measured interpolation or WLED matching error justifies them; space CCT roughly by mired rather than equal Kelvin.
 - Ray120c is only the 100% brightness calibration reference for the WLED strip.
 - For Ray120c OpenAPI v2 `set_cct`, use raw `intensity` `0..1000` (`10` is `1%`) and raw `gm` `0..200` (`0` max magenta, `100` neutral, `200` max green). The v2 request requires a fresh AES-256-GCM token per request.
 - For Ray120c HSL-like color work, use OpenAPI v2 `set_hsi` / `get_hsi`; the repo wrapper exposes both `set_hsi` and `set_hsl` aliases. Validated low-intensity cases read back exact `hue/sat/intensity` for hues `0`, `120`, `240`, `360`, plus `hue=30,sat=50`.
@@ -52,7 +53,7 @@ description: Use when working on the WLED RGBWW optimizer, WLED channel control,
 - ESPHome configs are split into `firmware/esphome/wled-bedroom-rgbww-common.yaml`, `wled-bedroom-rgbww-no-webui.yaml`, and `wled-bedroom-rgbww-webui.yaml`; `wled-bedroom-rgbww.yaml` is a WebUI alias. Both variants use `esp32dev`, ESP-IDF, five LEDC outputs on `GPIO19/18/17/16/4`, `19531Hz`, API action `set_rgbww_12bit(...)`, and `all_off`. The No-WebUI variant has been verified on hardware for boot, Wi-Fi, Native API `6053`, and OTA `3232`; browser port `80` refusing is expected. The WebUI variant compiles and adds Basic Auth `web_server` on port `80`, but has not yet been flashed/verified on hardware. The ignored local `secrets.yaml` contains the `FireflyIoT` Wi-Fi credentials in plaintext.
 - `main.py` exposes `light(cw, ww, r, g, b)`, mapping that call order to ESPHome `set_rgbww_12bit(red, green, blue, warm_white, cold_white)`. It converts arguments with `int()`, does not clamp values in Python, and calls `all_off` when all converted values are zero.
 - Any first ESPHome firmware for this controller must include normal Wi-Fi credentials, `wifi.ap` with a strong fallback password, and `captive_portal:`; ESPHome fallback AP is opt-in and only exists if compiled into the YAML.
-- Color mode should use model-first matching in camera-observed color space plus a sparse LUT/residual correction for Ray120c HSL/RGB command behavior.
+- Color mode should use model-first matching in camera-observed color space plus a sparse LUT/residual correction for Ray120c HSL/RGB command behavior. Build a Ray120c target model and shared WLED inverse solver first; do not start with a direct Ray-command-to-WLED-code LUT. This plan is provisional: if CCT/G-M calibration measurements reveal a better model or solver structure, update the color-mode strategy to follow the measured evidence.
 - Do not treat Ray120c RGB mode as simple additive RGB unless measurements prove that assumption.
 
 ## Safety Notes
