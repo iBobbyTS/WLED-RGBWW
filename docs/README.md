@@ -184,10 +184,10 @@ final values.
 
 ### Native API Python Wrapper
 
-`main.py` exposes a convenience function:
+`esphome.py` exposes a convenience function:
 
 ```python
-from main import light
+from esphome import light
 
 light(cw, ww, r, g, b)
 ```
@@ -201,15 +201,15 @@ zero, it calls the ESPHome `all_off` action instead of
 Command-line use:
 
 ```bash
-.venv/bin/python main.py 0 0 2048 0 0
-.venv/bin/python main.py 0 0 0 0 0
+.venv/bin/python esphome.py 0 0 2048 0 0
+.venv/bin/python esphome.py 0 0 0 0 0
 ```
 
 Local validation:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m py_compile main.py tests/test_main.py
+.venv/bin/python -m py_compile esphome.py tests/test_main.py
 ```
 
 ## Phase 2: Camera-Based Matching
@@ -306,6 +306,43 @@ python3 camera_gphoto2.py auto-expose \
 The auto-exposure routine keeps ISO and aperture fixed, starts from the current bounded shutter speed, and decodes each trial with the same linear camera-RGB path. It uses decoded image max as the hard safety limit, but uses the strongest per-channel high-percentile contrast (`p99.9 - p10`) as the exposure feedback so saturated HSI/RGB hues are not misclassified as dark just because the green channel is weak. Very dark measurements jump by a bounded EV step, saturated measurements retreat by a bounded EV step, and mixed safe/overexposed brackets are refined with a geometric midpoint. The final saved image must have all decoded channels at or below `target_max`; rejected final captures are deleted and retried with a safer shutter. Temporary trial captures are capped by `--max-trials` (`5` by default), and total shutter releases including rejected finals and the saved final are capped by `--max-captures` (`10` by default). Trial RAW and decoded files are written under the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are saved to the requested output directories. Final filenames are automatically numbered on retries so gphoto2 never prompts to overwrite an existing file.
 
 Validation on 2026-06-05 used Ray120c CCT states `(0%, 0.1%, 1%, 10%, 50%, 100%) x (1800K, 5600K, 20000K)` plus HSI `100%` saturation at hues `0, 60, 120, 180, 240, 300`, from both underexposed (`1/8000`) and overexposed (`1s`) starts. The final report at `tmp/ae-ray120c-probe/20260605-184035/report.json` covered `48` auto-exposure runs with no errors, no final image/channel max above `49152`, maximum final channel value `48614`, and no run exceeding `10` shutter releases.
+
+### WLED Channel Code Response Measurement
+
+Use `measure_channel_response.py` to measure the WLED strip's per-channel code/duty to camera-linear response before Ray120c matching. Ray120c is not part of this measurement; the goal is to characterize the five WLED channels with the fixed Canon RAW linear pipeline.
+
+The script turns on one channel at a time, runs the existing bounded auto-exposure capture for each code, decodes the RAW image to `.npy`, computes region statistics, normalizes signal by shutter seconds, and writes an incremental JSON report under `tmp/channel-response/`. It starts and ends with `all_off`, and can optionally capture an all-off ambient frame and subtract its normalized signal from each measurement.
+
+First inspect the planned sweep without touching hardware:
+
+```bash
+.venv/bin/python measure_channel_response.py \
+  --channels cw,ww,r,g,b \
+  --codes "1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4095" \
+  --dry-run
+```
+
+For a real high-output sweep, pass `--allow-high-output` only after confirming the strip and camera setup are safe:
+
+```bash
+.venv/bin/python measure_channel_response.py \
+  --channels cw,ww,r,g,b \
+  --codes "1,2,3,4,6,8,12,16,24,32,48,64,96,128,192,256,384,512,768,1024,1536,2048,3072,4095" \
+  --location-config config/location/locations-YYYYMMDD-HHMMSS.json \
+  --block-indices all \
+  --allow-high-output
+```
+
+If no `--roi` or `--location-config` is provided, the script measures the full decoded image. For patch-based measurements, prefer a saved location-picker config. Use `--roi x,y,width,height` for simple rectangular regions.
+
+Each JSON measurement records:
+
+- channel, code, duty, and the exact ESPHome command vector
+- final auto-exposure result and shutter speed
+- `shutter_seconds`
+- per-region raw stats from decoded linear camera RGB
+- per-region `channel_mean_per_second` and `channel_median_per_second`
+- optional ambient-subtracted normalized channel means
 
 For interactive color-block location picking, use:
 
