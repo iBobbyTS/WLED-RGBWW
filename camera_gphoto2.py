@@ -23,6 +23,12 @@ DEFAULT_DECODE_STEM_SUFFIX = ".rawpy-linear-camera-rgb16"
 DEFAULT_DECODE_FORMATS = ("npy", "tiff")
 DEFAULT_AUTO_EXPOSURE_MAX = 49152
 DEFAULT_AUTO_EXPOSURE_MAX_TRIALS = 5
+DEFAULT_AUTO_EXPOSURE_MAX_CAPTURES = 10
+DEFAULT_AUTO_EXPOSURE_ACCEPT_MIN_RATIO = 0.85
+DEFAULT_AUTO_EXPOSURE_DARK_METRIC_THRESHOLD = 1000.0
+DEFAULT_AUTO_EXPOSURE_DARK_STEP_EV = 7
+DEFAULT_AUTO_EXPOSURE_SATURATION_THRESHOLD = 65000
+DEFAULT_AUTO_EXPOSURE_SATURATED_STEP_EV = 7
 DEFAULT_MIN_SHUTTER_SPEED = "1/8000"
 DEFAULT_MAX_SHUTTER_SPEED = "30"
 
@@ -97,6 +103,8 @@ class DecodeResult:
             "image_shape": list(self.image_shape),
             "image_dtype": self.image_dtype,
             "image_max": _nested_stat(self.stats, "image", "max"),
+            "image_channel_max": self.stats.get("image", {}).get("channel_max"),
+            "exposure_metric": _nested_stat(self.stats, "exposure", "channel_contrast_max"),
             "raw_visible_max": _nested_stat(self.stats, "raw_visible", "max"),
             "black_level_per_channel": self.stats.get("black_level_per_channel"),
             "white_level": self.stats.get("white_level"),
@@ -111,6 +119,9 @@ class AutoExposureTrial:
     decoded_max: int
     raw_visible_max: int | None
     accepted: bool
+    image_channel_max: tuple[int, ...] | None = None
+    exposure_metric: float | None = None
+    decision: str | None = None
 
     def to_jsonable(self) -> dict[str, object]:
         return {
@@ -119,6 +130,9 @@ class AutoExposureTrial:
             "decoded_max": self.decoded_max,
             "raw_visible_max": self.raw_visible_max,
             "accepted": self.accepted,
+            "image_channel_max": list(self.image_channel_max) if self.image_channel_max is not None else None,
+            "exposure_metric": self.exposure_metric,
+            "decision": self.decision,
         }
 
 
@@ -135,6 +149,7 @@ class AutoExposureResult:
             "final": self.final_capture.to_jsonable(),
             "trials": [trial.to_jsonable() for trial in self.trials],
             "rejected_finals": [trial.to_jsonable() for trial in self.rejected_finals],
+            "capture_count": len(self.trials) + 1 + len(self.rejected_finals),
         }
 
 
@@ -432,6 +447,7 @@ def decode_raw_image(
         )
 
     stats["image"] = _array_stats(np, image)
+    stats["exposure"] = _exposure_stats(np, image)
     output_files: list[Path] = []
 
     if "npy" in normalized_formats:
@@ -479,6 +495,7 @@ def auto_expose_capture(
     min_shutter_speed: str = DEFAULT_MIN_SHUTTER_SPEED,
     max_shutter_speed: str = DEFAULT_MAX_SHUTTER_SPEED,
     max_trials: int = DEFAULT_AUTO_EXPOSURE_MAX_TRIALS,
+    max_captures: int = DEFAULT_AUTO_EXPOSURE_MAX_CAPTURES,
     shutter_speeds: Sequence[str] | None = None,
     decode_output_dir: str | Path | None = None,
     decode_formats: Sequence[str] = DEFAULT_DECODE_FORMATS,
@@ -495,6 +512,8 @@ def auto_expose_capture(
         raise GPhoto2Error("target_max must be positive")
     if max_trials <= 0:
         raise GPhoto2Error("max_trials must be positive")
+    if max_captures < 2:
+        raise GPhoto2Error("max_captures must be at least 2")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -548,13 +567,17 @@ def auto_expose_capture(
 
     trials: list[AutoExposureTrial] = []
     best_index: int | None = None
+    over_index: int | None = None
+    accept_min = int(target_max * DEFAULT_AUTO_EXPOSURE_ACCEPT_MIN_RATIO)
+    target_metric = float(target_max) * 0.88
     current_index = _nearest_shutter_index(candidate_seconds, current_seconds)
     tested_indices: set[int] = set()
     PROJECT_TMP_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="auto-exposure-", dir=PROJECT_TMP_DIR) as tmpdir:
         trial_dir = Path(tmpdir) / "trials"
         trial_decode_dir = Path(tmpdir) / "decoded"
-        while current_index not in tested_indices and len(trials) < max_trials:
+        trial_budget = min(max_trials, max_captures - 1)
+        while current_index not in tested_indices and len(trials) < trial_budget:
             shutter_speed = candidates[current_index]
             trial = _capture_decode_trial(
                 index=len(trials),
@@ -581,14 +604,25 @@ def auto_expose_capture(
             trials.append(trial)
             tested_indices.add(current_index)
             if trial.accepted:
-                best_index = current_index
+                if best_index is None or current_index > best_index:
+                    best_index = current_index
+            else:
+                if over_index is None or current_index < over_index:
+                    over_index = current_index
 
             next_index = _next_shutter_index_from_measurement(
                 candidate_seconds,
                 current_index=current_index,
                 decoded_max=trial.decoded_max,
                 target_max=target_max,
+                exposure_metric=trial.exposure_metric,
+                target_metric=target_metric,
+                accept_min=accept_min,
             )
+            if trial.accepted and trial.decoded_max < accept_min and over_index is not None:
+                next_index = _bracket_midpoint_index(candidate_seconds, low_index=current_index, high_index=over_index)
+            elif not trial.accepted and best_index is not None:
+                next_index = _bracket_midpoint_index(candidate_seconds, low_index=best_index, high_index=current_index)
             if next_index == current_index:
                 break
             current_index = next_index
@@ -599,13 +633,17 @@ def auto_expose_capture(
 
     rejected_finals: list[AutoExposureTrial] = []
     final_index = best_index
+    safe_final: CaptureResult | None = None
+    safe_final_index: int | None = None
+    safe_final_max = -1
+    over_final_index: int | None = over_index
     tried_final_indices: set[int] = set()
-    while final_index not in tried_final_indices and len(rejected_finals) < max_trials:
+    while final_index not in tried_final_indices and len(trials) + len(rejected_finals) + 1 <= max_captures:
         tried_final_indices.add(final_index)
         shutter_speed = candidates[final_index]
         final_result = capture_image(
             output_dir=output_path,
-            filename_template=filename_template,
+            filename_template=_numbered_filename_template(filename_template, len(tried_final_indices) - 1),
             settings=CaptureSettings(
                 iso=iso,
                 aperture=aperture,
@@ -633,20 +671,61 @@ def auto_expose_capture(
             decoded=decoded,
         )
         decoded_max = _decoded_image_max(decoded)
+        exposure_metric = _decoded_exposure_metric(decoded)
         if decoded_max <= target_max:
-            return AutoExposureResult(
-                target_max=target_max,
-                final_capture=final_result,
-                trials=tuple(trials),
-                rejected_finals=tuple(rejected_finals),
-            )
+            if decoded_max > safe_final_max:
+                if safe_final is not None:
+                    _delete_capture_outputs(safe_final)
+                safe_final = final_result
+                safe_final_index = final_index
+                safe_final_max = decoded_max
+            else:
+                _delete_capture_outputs(final_result)
 
+            exposure_is_close = (
+                decoded_max >= accept_min
+                or (exposure_metric is not None and exposure_metric >= target_metric * DEFAULT_AUTO_EXPOSURE_ACCEPT_MIN_RATIO)
+                or final_index == len(candidates) - 1
+            )
+            if exposure_is_close:
+                return AutoExposureResult(
+                    target_max=target_max,
+                    final_capture=safe_final,
+                    trials=tuple(trials),
+                    rejected_finals=tuple(rejected_finals),
+                )
+
+            next_final_index = _next_shutter_index_from_measurement(
+                candidate_seconds,
+                current_index=final_index,
+                decoded_max=decoded_max,
+                target_max=target_max,
+                exposure_metric=exposure_metric,
+                target_metric=target_metric,
+                accept_min=accept_min,
+            )
+            if decoded_max < accept_min and over_final_index is not None:
+                next_final_index = _bracket_midpoint_index(
+                    candidate_seconds,
+                    low_index=final_index,
+                    high_index=over_final_index,
+                )
+            if next_final_index == final_index or next_final_index in tried_final_indices:
+                break
+            final_index = next_final_index
+            continue
+
+        if over_final_index is None or final_index < over_final_index:
+            over_final_index = final_index
         rejected_finals.append(
             AutoExposureTrial(
                 index=len(rejected_finals),
                 shutter_speed=shutter_speed,
                 decoded_max=decoded_max,
                 raw_visible_max=_decoded_raw_visible_max(decoded),
+                image_channel_max=_decoded_image_channel_max(decoded),
+                exposure_metric=exposure_metric,
+                decision="final_rejected",
                 accepted=False,
             )
         )
@@ -656,10 +735,27 @@ def auto_expose_capture(
             current_index=final_index,
             decoded_max=decoded_max,
             target_max=target_max,
+            exposure_metric=exposure_metric,
+            target_metric=target_metric,
+            accept_min=accept_min,
         )
-        if next_final_index >= final_index:
+        if safe_final_index is not None:
+            next_final_index = _bracket_midpoint_index(
+                candidate_seconds,
+                low_index=safe_final_index,
+                high_index=final_index,
+            )
+        if next_final_index == final_index or next_final_index in tried_final_indices:
             break
         final_index = next_final_index
+
+    if safe_final is not None:
+        return AutoExposureResult(
+            target_max=target_max,
+            final_capture=safe_final,
+            trials=tuple(trials),
+            rejected_finals=tuple(rejected_finals),
+        )
 
     raise GPhoto2Error(f"final capture could not meet decoded max <= {target_max}")
 
@@ -669,7 +765,19 @@ def _parse_saved_file(output: str) -> Path:
         match = re.match(r"Saving file as (?P<path>.+)$", line.strip())
         if match:
             return Path(match.group("path"))
-    raise GPhoto2Error("could not parse saved file path from gphoto2 output")
+    snippet = output.strip() or "<empty stdout>"
+    raise GPhoto2Error(f"could not parse saved file path from gphoto2 output: {snippet}")
+
+
+def _numbered_filename_template(template: str, index: int) -> str:
+    if index == 0:
+        return template
+    path = Path(template)
+    suffix = "".join(path.suffixes)
+    if suffix:
+        stem = str(path)[: -len(suffix)]
+        return f"{stem}-final{index:03d}{suffix}"
+    return f"{template}-final{index:03d}"
 
 
 def _run(
@@ -761,13 +869,61 @@ def _floor_shutter_index(candidates: Sequence[Fraction], seconds: Fraction) -> i
     return chosen
 
 
+def _bracket_midpoint_index(candidates: Sequence[Fraction], *, low_index: int, high_index: int) -> int:
+    if low_index >= high_index:
+        return low_index
+    low_seconds = float(candidates[low_index])
+    high_seconds = float(candidates[high_index])
+    midpoint_seconds = (low_seconds * high_seconds) ** 0.5
+    midpoint = _floor_shutter_index(candidates, Fraction(midpoint_seconds).limit_denominator(1_000_000))
+    if midpoint <= low_index:
+        return low_index + 1
+    if midpoint >= high_index:
+        return high_index - 1
+    return midpoint
+
+
 def _next_shutter_index_from_measurement(
     candidates: Sequence[Fraction],
     *,
     current_index: int,
     decoded_max: int,
     target_max: int,
+    exposure_metric: float | None = None,
+    target_metric: float | None = None,
+    accept_min: int | None = None,
+    dark_metric_threshold: float = DEFAULT_AUTO_EXPOSURE_DARK_METRIC_THRESHOLD,
+    dark_step_ev: int = DEFAULT_AUTO_EXPOSURE_DARK_STEP_EV,
+    saturation_threshold: int = DEFAULT_AUTO_EXPOSURE_SATURATION_THRESHOLD,
+    saturated_step_ev: int = DEFAULT_AUTO_EXPOSURE_SATURATED_STEP_EV,
 ) -> int:
+    if decoded_max >= saturation_threshold:
+        desired_seconds = candidates[current_index] / (2**saturated_step_ev)
+        return _floor_shutter_index(candidates, desired_seconds)
+
+    if exposure_metric is not None and exposure_metric < dark_metric_threshold and decoded_max < target_max:
+        desired_seconds = candidates[current_index] * (2**dark_step_ev)
+        return _floor_shutter_index(candidates, desired_seconds)
+
+    if accept_min is not None and accept_min <= decoded_max <= target_max:
+        return current_index
+
+    if accept_min is not None and decoded_max < accept_min and decoded_max > 0:
+        desired_seconds = candidates[current_index] * Fraction(target_max, decoded_max)
+        next_index = _floor_shutter_index(candidates, desired_seconds)
+        if next_index == current_index and current_index + 1 < len(candidates):
+            return current_index + 1
+        return next_index
+
+    if (
+        exposure_metric is not None
+        and target_metric is not None
+        and exposure_metric > 0
+        and decoded_max < target_max
+    ):
+        desired_seconds = candidates[current_index] * Fraction(int(target_metric), max(1, int(exposure_metric)))
+        return _floor_shutter_index(candidates, desired_seconds)
+
     if decoded_max <= 0:
         return len(candidates) - 1
 
@@ -820,11 +976,19 @@ def _capture_decode_trial(
         )
         decoded = decoder(capture.saved_file, output_dir=decode_output_dir, formats=decode_formats)
         decoded_max = _decoded_image_max(decoded)
+        exposure_metric = _decoded_exposure_metric(decoded)
         return AutoExposureTrial(
             index=index,
             shutter_speed=settings.shutter_speed,
             decoded_max=decoded_max,
             raw_visible_max=_decoded_raw_visible_max(decoded),
+            image_channel_max=_decoded_image_channel_max(decoded),
+            exposure_metric=exposure_metric,
+            decision=_auto_exposure_decision(
+                decoded_max=decoded_max,
+                target_max=target_max,
+                exposure_metric=exposure_metric,
+            ),
             accepted=decoded_max <= target_max,
         )
     finally:
@@ -847,6 +1011,38 @@ def _decoded_raw_visible_max(decoded: DecodeResult) -> int | None:
         return int(decoded.stats["raw_visible"]["max"])
     except (KeyError, TypeError):
         return None
+
+
+def _decoded_image_channel_max(decoded: DecodeResult) -> tuple[int, ...] | None:
+    try:
+        values = decoded.stats["image"]["channel_max"]
+    except (KeyError, TypeError):
+        return None
+    if values is None:
+        return None
+    return tuple(int(value) for value in values)
+
+
+def _decoded_exposure_metric(decoded: DecodeResult) -> float | None:
+    try:
+        return float(decoded.stats["exposure"]["channel_contrast_max"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _auto_exposure_decision(
+    *,
+    decoded_max: int,
+    target_max: int,
+    exposure_metric: float | None,
+) -> str:
+    if decoded_max >= DEFAULT_AUTO_EXPOSURE_SATURATION_THRESHOLD:
+        return "saturated_backoff"
+    if exposure_metric is not None and exposure_metric < DEFAULT_AUTO_EXPOSURE_DARK_METRIC_THRESHOLD and decoded_max < target_max:
+        return "dark_boost"
+    if decoded_max <= target_max:
+        return "accepted"
+    return "ratio_reduce"
 
 
 def _nested_stat(stats: dict[str, Any], section: str, key: str) -> int | float | None:
@@ -927,6 +1123,24 @@ def _array_stats(np: Any, array: Any) -> dict[str, Any]:
         "channel_max": _channel_stat(array, "max"),
         "channel_mean": _channel_stat(array, "mean"),
         "percentiles": [float(value) for value in np.percentile(array, [0, 0.01, 0.1, 1, 50, 99, 99.9, 99.99, 100])],
+    }
+
+
+def _exposure_stats(np: Any, image: Any) -> dict[str, Any]:
+    if len(image.shape) != 3 or image.shape[2] < 2:
+        return {}
+    channel_contrasts: list[float] = []
+    for channel in range(image.shape[2]):
+        p10, p99_9 = np.percentile(image[..., channel], [10, 99.9])
+        channel_contrasts.append(float(p99_9 - p10))
+    green = image[..., 1]
+    green_p10, green_p99_9 = np.percentile(green, [10, 99.9])
+    return {
+        "channel_contrast": channel_contrasts,
+        "channel_contrast_max": max(channel_contrasts),
+        "green_p10": float(green_p10),
+        "green_p99_9": float(green_p99_9),
+        "green_contrast": float(green_p99_9 - green_p10),
     }
 
 
@@ -1023,6 +1237,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum temporary exposure trials before saving the best accepted exposure.",
     )
     auto_parser.add_argument(
+        "--max-captures",
+        type=int,
+        default=DEFAULT_AUTO_EXPOSURE_MAX_CAPTURES,
+        help="Maximum shutter releases including temporary trials, rejected finals, and the saved final.",
+    )
+    auto_parser.add_argument(
         "--shutter-speed",
         action="append",
         dest="shutter_speeds",
@@ -1099,6 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_shutter_speed=args.min_shutter_speed,
                 max_shutter_speed=args.max_shutter_speed,
                 max_trials=args.max_trials,
+                max_captures=args.max_captures,
                 shutter_speeds=args.shutter_speeds,
                 decode_output_dir=args.decode_output_dir,
                 decode_formats=args.decode_formats or DEFAULT_DECODE_FORMATS,

@@ -299,10 +299,13 @@ python3 camera_gphoto2.py auto-expose \
   --aperture 4 \
   --min-shutter-speed 1/8000 \
   --max-shutter-speed 30 \
-  --max-trials 5
+  --max-trials 5 \
+  --max-captures 10
 ```
 
-The auto-exposure routine keeps ISO and aperture fixed, starts from the current bounded shutter speed, decodes each trial with the same linear camera-RGB path, and computes the next shutter speed from the measured ratio `target_max / decoded_max`. It rounds that computed exposure to the nearest conservative gphoto2 shutter candidate instead of scanning from the beginning or blindly stepping one stop at a time. Temporary trial captures are capped by `--max-trials` (`5` by default); if the cap is reached, the best accepted exposure seen so far is used for the final saved capture. Trial RAW and decoded files are written under the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are saved to the requested output directories.
+The auto-exposure routine keeps ISO and aperture fixed, starts from the current bounded shutter speed, and decodes each trial with the same linear camera-RGB path. It uses decoded image max as the hard safety limit, but uses the strongest per-channel high-percentile contrast (`p99.9 - p10`) as the exposure feedback so saturated HSI/RGB hues are not misclassified as dark just because the green channel is weak. Very dark measurements jump by a bounded EV step, saturated measurements retreat by a bounded EV step, and mixed safe/overexposed brackets are refined with a geometric midpoint. The final saved image must have all decoded channels at or below `target_max`; rejected final captures are deleted and retried with a safer shutter. Temporary trial captures are capped by `--max-trials` (`5` by default), and total shutter releases including rejected finals and the saved final are capped by `--max-captures` (`10` by default). Trial RAW and decoded files are written under the project `tmp/` tree and deleted before the command returns. The final accepted RAW plus final decoded `.npy`/`.tiff`/`.json` sidecar are saved to the requested output directories. Final filenames are automatically numbered on retries so gphoto2 never prompts to overwrite an existing file.
+
+Validation on 2026-06-05 used Ray120c CCT states `(0%, 0.1%, 1%, 10%, 50%, 100%) x (1800K, 5600K, 20000K)` plus HSI `100%` saturation at hues `0, 60, 120, 180, 240, 300`, from both underexposed (`1/8000`) and overexposed (`1s`) starts. The final report at `tmp/ae-ray120c-probe/20260605-184035/report.json` covered `48` auto-exposure runs with no errors, no final image/channel max above `49152`, maximum final channel value `48614`, and no run exceeding `10` shutter releases.
 
 For interactive color-block location picking, use:
 
