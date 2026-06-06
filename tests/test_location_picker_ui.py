@@ -1,6 +1,11 @@
+import json
+import time
 import tempfile
-import tkinter as tk
 import unittest
+import urllib.error
+import urllib.request
+import zlib
+from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
@@ -13,12 +18,14 @@ import location_picker_ui
 class LocationArgsTests(unittest.TestCase):
     def test_parse_args_includes_exposure_trial_limit(self):
         default_args = location_picker_ui.parse_args([])
-        custom_args = location_picker_ui.parse_args(["--max-exposure-trials", "3"])
+        custom_args = location_picker_ui.parse_args(["--max-exposure-trials", "3", "--ui-port", "0", "--port", "usb:001,010"])
 
         self.assertEqual(default_args.max_exposure_trials, location_picker_ui.DEFAULT_MAX_EXPOSURE_TRIALS)
         self.assertEqual(default_args.rows, 4)
         self.assertEqual(default_args.cols, 6)
         self.assertEqual(custom_args.max_exposure_trials, 3)
+        self.assertEqual(custom_args.ui_port, 0)
+        self.assertEqual(custom_args.camera_port, "usb:001,010")
 
 
 class LocationPreviewTests(unittest.TestCase):
@@ -30,24 +37,7 @@ class LocationPreviewTests(unittest.TestCase):
         self.assertEqual(preview.dtype, np.uint8)
         self.assertEqual(preview.tolist(), [[[0, 128, 255], [255, 255, 0]]])
 
-    def test_resize_nearest_rgb_preserves_expected_pixels(self):
-        image = np.array(
-            [
-                [[1, 0, 0], [2, 0, 0]],
-                [[3, 0, 0], [4, 0, 0]],
-            ],
-            dtype=np.uint8,
-        )
-
-        resized = location_picker_ui.resize_nearest_rgb(image, 2.0)
-
-        self.assertEqual(resized.shape, (4, 4, 3))
-        self.assertEqual(resized[0, 0, 0], 1)
-        self.assertEqual(resized[0, 2, 0], 2)
-        self.assertEqual(resized[2, 0, 0], 3)
-        self.assertEqual(resized[2, 2, 0], 4)
-
-    def test_ppm_photo_data_loads_in_tk(self):
+    def test_rgb_to_png_data_writes_valid_rgb_png(self):
         image = np.array(
             [
                 [[255, 0, 0], [0, 255, 0]],
@@ -56,17 +46,18 @@ class LocationPreviewTests(unittest.TestCase):
             dtype=np.uint8,
         )
 
-        data = location_picker_ui.rgb_to_ppm_photo_data(image)
+        data = location_picker_ui.rgb_to_png_data(image)
 
-        self.assertTrue(data.startswith(b"P6\n2 2\n255\n"))
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            photo = tk.PhotoImage(data=data, format="PPM")
-            self.assertEqual(photo.width(), 2)
-            self.assertEqual(photo.height(), 2)
-        finally:
-            root.destroy()
+        self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(data[12:16], b"IHDR")
+        self.assertEqual(int.from_bytes(data[16:20], "big"), 2)
+        self.assertEqual(int.from_bytes(data[20:24], "big"), 2)
+        self.assertEqual(data[24], 8)
+        self.assertEqual(data[25], 2)
+        idat_start = data.index(b"IDAT") + 4
+        idat_length = int.from_bytes(data[idat_start - 8:idat_start - 4], "big")
+        raw = zlib.decompress(data[idat_start : idat_start + idat_length])
+        self.assertEqual(raw, b"\x00\xff\x00\x00\x00\xff\x00\x00\x00\x00\xff\xff\xff\xff")
 
     def test_detect_color_checker_quads_from_grid_lines(self):
         image = np.full((240, 360, 3), 180, dtype=np.uint8)
@@ -297,6 +288,176 @@ class LocationConfigTests(unittest.TestCase):
             self.assertEqual(path.parent, output_dir)
             self.assertTrue(path.exists())
             self.assertIn("locations-", path.name)
+
+
+class LocationWebApiTests(unittest.TestCase):
+    def make_state(self) -> location_picker_ui.LocationPickerState:
+        args = Namespace(
+            blocks=1,
+            rows=1,
+            cols=1,
+            target_max=location_picker_ui.DEFAULT_TARGET_MAX,
+            iso="100",
+            aperture="4",
+            min_shutter_speed="1/8000",
+            max_shutter_speed="30",
+            max_exposure_trials=1,
+            model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
+            camera_port=None,
+            gphoto2="gphoto2",
+            timeout=1.0,
+        )
+        state = location_picker_ui.LocationPickerState(args=args)
+        capture = camera_gphoto2.CaptureResult(
+            connection=camera_gphoto2.CameraConnection("Canon EOS R6 Mark III", "usb:001,010"),
+            settings=camera_gphoto2.CaptureSettings(iso="100", aperture="4", shutter_speed="1/30", image_format="RAW"),
+            saved_file=Path("tmp/location-ui/camera/test.cr3"),
+            stdout="",
+        )
+        state.preview_image = np.array([[[255, 0, 0], [0, 255, 0]]], dtype=np.uint8)
+        state.preview_png = location_picker_ui.rgb_to_png_data(state.preview_image)
+        state.image_width = 2
+        state.image_height = 1
+        state.capture_result = camera_gphoto2.AutoExposureResult(target_max=49152, final_capture=capture, trials=())
+        state.status = "已加载"
+        state.loading = False
+        return state
+
+    def start_server(self, state: location_picker_ui.LocationPickerState):
+        server = location_picker_ui.create_location_picker_server(host="127.0.0.1", port=0, state=state)
+        thread = location_picker_ui.threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_state_and_preview_endpoints(self):
+        state = self.make_state()
+        server, base_url = self.start_server(state)
+        try:
+            with urllib.request.urlopen(base_url + "/api/state", timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(base_url + "/preview.png", timeout=5) as response:
+                preview = response.read()
+
+            self.assertTrue(payload["has_image"])
+            self.assertEqual(payload["image"], {"width": 2, "height": 1})
+            self.assertTrue(preview.startswith(b"\x89PNG\r\n\x1a\n"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_save_endpoint_validates_and_writes_config(self):
+        state = self.make_state()
+        server, base_url = self.start_server(state)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "locations"
+            try:
+                request = urllib.request.Request(
+                    base_url + "/api/save",
+                    data=json.dumps(
+                        {
+                            "target_block_count": 1,
+                            "quads": [[{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 1, "y": 0}, {"x": 0, "y": 0}]],
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with mock.patch.object(location_picker_ui, "CONFIG_LOCATION_DIR", output_dir):
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+
+                saved_path = Path(payload["path"])
+                self.assertEqual(saved_path.parent, output_dir)
+                self.assertTrue(saved_path.exists())
+                self.assertEqual(payload["config"]["target_block_count"], 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_detect_endpoint_rejects_missing_rows(self):
+        state = self.make_state()
+        server, base_url = self.start_server(state)
+        try:
+            request = urllib.request.Request(
+                base_url + "/api/detect",
+                data=json.dumps({"cols": 1}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            payload = json.loads(raised.exception.read().decode("utf-8"))
+            self.assertEqual(payload["error"], "rows is required")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_retry_endpoint_restarts_capture_after_failure(self):
+        args = Namespace(
+            blocks=1,
+            rows=1,
+            cols=1,
+            target_max=location_picker_ui.DEFAULT_TARGET_MAX,
+            iso="100",
+            aperture="4",
+            min_shutter_speed="1/8000",
+            max_shutter_speed="30",
+            max_exposure_trials=1,
+            model=camera_gphoto2.DEFAULT_CAMERA_MODEL,
+            camera_port=None,
+            gphoto2="gphoto2",
+            timeout=1.0,
+        )
+        state = location_picker_ui.LocationPickerState(args=args)
+        capture = camera_gphoto2.CaptureResult(
+            connection=camera_gphoto2.CameraConnection("Canon EOS R6 Mark III", "usb:001,010"),
+            settings=camera_gphoto2.CaptureSettings(iso="100", aperture="4", shutter_speed="1/30", image_format="RAW"),
+            saved_file=Path("tmp/location-ui/camera/test.cr3"),
+            stdout="",
+        )
+        auto_result = camera_gphoto2.AutoExposureResult(target_max=49152, final_capture=capture, trials=())
+        preview = np.array([[[10, 20, 30]]], dtype=np.uint8)
+
+        with mock.patch.object(location_picker_ui.camera_gphoto2, "auto_expose_capture", side_effect=[RuntimeError("camera offline"), auto_result]):
+            with mock.patch.object(location_picker_ui, "find_npy_output", return_value=Path("unused.npy")):
+                with mock.patch.object(location_picker_ui, "load_preview_from_npy", return_value=preview):
+                    self.assertTrue(state.start_auto_exposure())
+                    self.wait_for_state(state, lambda snapshot: not snapshot["loading"])
+                    failed = state.snapshot()
+                    self.assertFalse(failed["has_image"])
+                    self.assertEqual(failed["error"], "camera offline")
+                    self.assertTrue(failed["retry_available"])
+
+                    server, base_url = self.start_server(state)
+                    try:
+                        request = urllib.request.Request(
+                            base_url + "/api/retry",
+                            data=b"{}",
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            retry_payload = json.loads(response.read().decode("utf-8"))
+
+                        self.assertTrue(retry_payload["retry_started"])
+                        self.wait_for_state(state, lambda snapshot: snapshot["has_image"])
+                        loaded = state.snapshot()
+                        self.assertTrue(loaded["has_image"])
+                        self.assertIsNone(loaded["error"])
+                        self.assertFalse(loaded["retry_available"])
+                    finally:
+                        server.shutdown()
+                        server.server_close()
+
+    def wait_for_state(self, state: location_picker_ui.LocationPickerState, predicate) -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if predicate(state.snapshot()):
+                return
+            time.sleep(0.02)
+        self.fail(f"timed out waiting for state; last snapshot: {state.snapshot()}")
 
 
 if __name__ == "__main__":

@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import struct
 import threading
-from dataclasses import dataclass
+import webbrowser
+import zlib
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-
-import tkinter as tk
-from tkinter import messagebox, ttk
+from urllib.parse import urlparse
 
 import camera_gphoto2
 
@@ -26,12 +29,9 @@ DEFAULT_ISO = "100"
 DEFAULT_APERTURE = "4"
 DEFAULT_MIN_SHUTTER_SPEED = "1/8000"
 DEFAULT_MAX_SHUTTER_SPEED = "30"
-DEFAULT_CANVAS_WIDTH = 1200
-DEFAULT_CANVAS_HEIGHT = 800
+DEFAULT_UI_HOST = "127.0.0.1"
+DEFAULT_UI_PORT = 8765
 DEFAULT_AUTO_DETECT_INSET_RATIO = 0.08
-HANDLE_RADIUS = 7
-EDGE_HIT_DISTANCE = 8
-MIN_CREATE_PIXELS = 6
 
 Point = tuple[float, float]
 Quad = list[Point]
@@ -57,17 +57,6 @@ class AxisGridEstimate:
     col_segments: list[ProjectionSegment]
 
 
-@dataclass
-class DragState:
-    mode: str
-    start_canvas: Point
-    start_image: Point | None = None
-    quad_index: int | None = None
-    vertex_index: int | None = None
-    edge_index: int | None = None
-    original_quad: Quad | None = None
-
-
 def linear_rgb_to_preview_uint8(image: Any, *, white_point: int = DEFAULT_TARGET_MAX) -> Any:
     np = _import_numpy()
     if image.ndim != 3 or image.shape[2] != 3:
@@ -78,22 +67,28 @@ def linear_rgb_to_preview_uint8(image: Any, *, white_point: int = DEFAULT_TARGET
     return (normalized * 255.0 + 0.5).astype(np.uint8)
 
 
-def resize_nearest_rgb(image: Any, scale: float) -> Any:
+def rgb_to_png_data(image: Any) -> bytes:
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"expected HxWx3 image, got shape {image.shape}")
     np = _import_numpy()
-    if scale <= 0:
-        raise ValueError("scale must be positive")
-    source_h, source_w = image.shape[:2]
-    target_w = max(1, int(round(source_w * scale)))
-    target_h = max(1, int(round(source_h * scale)))
-    row_index = np.minimum((np.arange(target_h) / scale).astype(np.int64), source_h - 1)
-    col_index = np.minimum((np.arange(target_w) / scale).astype(np.int64), source_w - 1)
-    return image[row_index[:, None], col_index[None, :]]
-
-
-def rgb_to_ppm_photo_data(image: Any) -> bytes:
+    if image.dtype != np.uint8:
+        raise ValueError(f"expected uint8 image, got dtype {image.dtype}")
     height, width = image.shape[:2]
-    header = f"P6\n{width} {height}\n255\n".encode("ascii")
-    return header + image.tobytes()
+    raw_rows = b"".join(b"\x00" + image[row].tobytes() for row in range(height))
+    return b"".join(
+        [
+            b"\x89PNG\r\n\x1a\n",
+            _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)),
+            _png_chunk(b"IDAT", zlib.compress(raw_rows, level=6)),
+            _png_chunk(b"IEND", b""),
+        ]
+    )
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    checksum = zlib.crc32(kind)
+    checksum = zlib.crc32(data, checksum) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
 
 
 def detect_color_checker_quads(
@@ -940,10 +935,11 @@ def build_location_config(
     }
 
 
-def save_location_config(config: dict[str, Any], *, output_dir: Path = CONFIG_LOCATION_DIR) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def save_location_config(config: dict[str, Any], *, output_dir: Path | None = None) -> Path:
+    target_dir = output_dir or CONFIG_LOCATION_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = output_dir / f"locations-{timestamp}.json"
+    path = target_dir / f"locations-{timestamp}.json"
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return path
 
@@ -970,81 +966,35 @@ def _import_numpy() -> Any:
     return np
 
 
-class LocationPickerApp:
-    def __init__(self, root: tk.Tk, args: argparse.Namespace) -> None:
-        self.root = root
-        self.args = args
-        self.root.title("WLED-RGBWW Location Picker")
+@dataclass
+class LocationPickerState:
+    args: argparse.Namespace
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    preview_image: Any | None = None
+    preview_png: bytes | None = None
+    capture_result: camera_gphoto2.AutoExposureResult | None = None
+    image_width: int = 0
+    image_height: int = 0
+    status: str = "等待自动曝光..."
+    error: str | None = None
+    saved_path: str | None = None
+    loading: bool = False
 
-        self.preview_image: Any | None = None
-        self.photo: tk.PhotoImage | None = None
-        self.capture_result: camera_gphoto2.AutoExposureResult | None = None
-        self.image_width = 0
-        self.image_height = 0
-        self.zoom = 1.0
-        self.offset_x = 0.0
-        self.offset_y = 0.0
-        self.image_item: int | None = None
-        self.quads: list[Quad] = []
-        self.selected_quad: int | None = None
-        self.drag: DragState | None = None
-        self.create_preview: Quad | None = None
-
-        self.block_count = tk.IntVar(value=args.blocks)
-        self.grid_rows = tk.IntVar(value=args.rows)
-        self.grid_cols = tk.IntVar(value=args.cols)
-        self.status = tk.StringVar(value="正在自动曝光...")
-
-        self._build_ui()
-        self._bind_events()
-        self.root.after(50, self._start_auto_exposure)
-
-    def _build_ui(self) -> None:
-        toolbar = ttk.Frame(self.root, padding=6)
-        toolbar.pack(side=tk.TOP, fill=tk.X)
-
-        ttk.Label(toolbar, text="总色块数").pack(side=tk.LEFT)
-        count_entry = ttk.Spinbox(toolbar, from_=1, to=1000, textvariable=self.block_count, width=6, command=self._update_confirm_state)
-        count_entry.pack(side=tk.LEFT, padx=(4, 10))
-        count_entry.bind("<KeyRelease>", lambda _event: self._update_confirm_state())
-
-        ttk.Label(toolbar, text="行").pack(side=tk.LEFT)
-        row_entry = ttk.Spinbox(toolbar, from_=1, to=100, textvariable=self.grid_rows, width=4)
-        row_entry.pack(side=tk.LEFT, padx=(4, 8))
-        ttk.Label(toolbar, text="列").pack(side=tk.LEFT)
-        col_entry = ttk.Spinbox(toolbar, from_=1, to=100, textvariable=self.grid_cols, width=4)
-        col_entry.pack(side=tk.LEFT, padx=(4, 8))
-        ttk.Button(toolbar, text="自动识别", command=self.auto_detect_blocks).pack(side=tk.LEFT, padx=(0, 10))
-
-        ttk.Button(toolbar, text="适配窗口", command=self.fit_to_window).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="删除选中", command=self.delete_selected).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(toolbar, text="清空", command=self.clear_quads).pack(side=tk.LEFT, padx=(0, 12))
-
-        self.confirm_button = ttk.Button(toolbar, text="确认保存", command=self.save_config, state=tk.DISABLED)
-        self.confirm_button.pack(side=tk.LEFT)
-
-        ttk.Label(toolbar, textvariable=self.status).pack(side=tk.LEFT, padx=(12, 0))
-
-        self.canvas = tk.Canvas(self.root, width=DEFAULT_CANVAS_WIDTH, height=DEFAULT_CANVAS_HEIGHT, bg="#202020", highlightthickness=0)
-        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-    def _bind_events(self) -> None:
-        self.canvas.bind("<ButtonPress-1>", self.on_left_press)
-        self.canvas.bind("<B1-Motion>", self.on_left_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_left_release)
-        self.canvas.bind("<ButtonPress-2>", self.on_pan_press)
-        self.canvas.bind("<B2-Motion>", self.on_pan_drag)
-        self.canvas.bind("<ButtonPress-3>", self.on_pan_press)
-        self.canvas.bind("<B3-Motion>", self.on_pan_drag)
-        self.canvas.bind("<MouseWheel>", self.on_mouse_wheel)
-        self.canvas.bind("<Button-4>", lambda event: self.zoom_at(event.x, event.y, 1.15))
-        self.canvas.bind("<Button-5>", lambda event: self.zoom_at(event.x, event.y, 1 / 1.15))
-        self.root.bind("<Delete>", lambda _event: self.delete_selected())
-        self.root.bind("<BackSpace>", lambda _event: self.delete_selected())
-
-    def _start_auto_exposure(self) -> None:
+    def start_auto_exposure(self) -> bool:
+        with self.lock:
+            if self.loading:
+                return False
+            self.preview_image = None
+            self.preview_png = None
+            self.capture_result = None
+            self.image_width = 0
+            self.image_height = 0
+            self.status = "正在自动曝光..."
+            self.error = None
+            self.loading = True
         thread = threading.Thread(target=self._auto_exposure_worker, daemon=True)
         thread.start()
+        return True
 
     def _auto_exposure_worker(self) -> None:
         try:
@@ -1061,245 +1011,818 @@ class LocationPickerApp:
                 max_trials=self.args.max_exposure_trials,
                 decode_output_dir=run_dir / "decoded",
                 decode_formats=("npy",),
-                port=self.args.port,
+                port=self.args.camera_port,
                 expected_model=self.args.model,
                 executable=self.args.gphoto2,
                 timeout=self.args.timeout,
             )
             preview = load_preview_from_npy(find_npy_output(result.final_capture), white_point=self.args.target_max)
         except Exception as exc:
-            self.root.after(0, self._show_capture_error, exc)
+            with self.lock:
+                self.status = f"自动曝光失败: {exc}"
+                self.error = str(exc)
+                self.loading = False
             return
-        self.root.after(0, self._set_image, result, preview)
 
-    def _show_capture_error(self, exc: Exception) -> None:
-        self.status.set(f"自动曝光失败: {exc}")
-        messagebox.showerror("自动曝光失败", str(exc))
-
-    def _set_image(self, result: camera_gphoto2.AutoExposureResult, preview: Any) -> None:
-        self.capture_result = result
-        self.preview_image = preview
-        self.image_height, self.image_width = preview.shape[:2]
+        image_height, image_width = preview.shape[:2]
         image_max = result.final_capture.decoded.to_jsonable().get("image_max") if result.final_capture.decoded else None
         shutter = result.final_capture.settings.shutter_speed
-        self.status.set(f"已加载: {self.image_width}x{self.image_height}, shutter={shutter}, max={image_max}")
-        self.fit_to_window()
+        with self.lock:
+            self.capture_result = result
+            self.preview_image = preview
+            self.preview_png = rgb_to_png_data(preview)
+            self.image_width = int(image_width)
+            self.image_height = int(image_height)
+            self.status = f"已加载: {image_width}x{image_height}, shutter={shutter}, max={image_max}"
+            self.error = None
+            self.loading = False
 
-    def fit_to_window(self) -> None:
-        if self.preview_image is None:
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            capture = self.capture_result.to_jsonable() if self.capture_result is not None else None
+            return {
+                "status": self.status,
+                "error": self.error,
+                "saved_path": self.saved_path,
+                "loading": self.loading,
+                "has_image": self.preview_png is not None,
+                "retry_available": not self.loading and self.preview_png is None,
+                "image": {
+                    "width": self.image_width,
+                    "height": self.image_height,
+                },
+                "defaults": {
+                    "blocks": self.args.blocks,
+                    "rows": self.args.rows,
+                    "cols": self.args.cols,
+                },
+                "capture": capture,
+            }
+
+    def detect_quads(self, *, rows: int, cols: int) -> dict[str, Any]:
+        if rows <= 0 or cols <= 0:
+            raise ValueError("rows and cols must be positive")
+        with self.lock:
+            image = self.preview_image
+        if image is None:
+            raise RuntimeError("preview image is not ready")
+
+        quads = detect_color_checker_quads(image, rows=rows, cols=cols)
+        with self.lock:
+            self.status = f"已自动识别 {rows}x{cols} 色块"
+        return {
+            "status": f"已自动识别 {rows}x{cols} 色块",
+            "target_block_count": rows * cols,
+            "quads": _quads_to_jsonable(quads),
+        }
+
+    def save_quads(self, *, target_block_count: int, quads_payload: Any) -> dict[str, Any]:
+        with self.lock:
+            capture = self.capture_result.final_capture if self.capture_result is not None else None
+            image_width = self.image_width
+            image_height = self.image_height
+        if capture is None or image_width <= 0 or image_height <= 0:
+            raise RuntimeError("preview image is not ready")
+
+        quads = parse_quads_payload(quads_payload, width=image_width, height=image_height)
+        config = build_location_config(
+            target_block_count=target_block_count,
+            image_width=image_width,
+            image_height=image_height,
+            quads=quads,
+            capture=capture,
+        )
+        path = save_location_config(config)
+        with self.lock:
+            self.saved_path = str(path)
+            self.status = f"已保存: {path}"
+        return {"status": f"已保存: {path}", "path": str(path), "config": config}
+
+
+def _quads_to_jsonable(quads: list[Quad]) -> list[list[list[float]]]:
+    return [[[float(x), float(y)] for x, y in quad] for quad in quads]
+
+
+def parse_quads_payload(raw_quads: Any, *, width: int, height: int) -> list[Quad]:
+    if not isinstance(raw_quads, list):
+        raise ValueError("quads must be a list")
+    quads: list[Quad] = []
+    for quad_index, raw_quad in enumerate(raw_quads):
+        if not isinstance(raw_quad, list) or len(raw_quad) != 4:
+            raise ValueError(f"quad {quad_index + 1} must contain four points")
+        quad: Quad = []
+        for point_index, raw_point in enumerate(raw_quad):
+            x, y = _parse_payload_point(raw_point, quad_index=quad_index, point_index=point_index)
+            if not (0.0 <= x <= width - 1 and 0.0 <= y <= height - 1):
+                raise ValueError(f"quad {quad_index + 1} point {point_index + 1} is outside the image")
+            quad.append((x, y))
+        quads.append(quad)
+    return quads
+
+
+def _parse_payload_point(raw_point: Any, *, quad_index: int, point_index: int) -> Point:
+    if isinstance(raw_point, dict):
+        raw_x = raw_point.get("x")
+        raw_y = raw_point.get("y")
+    elif isinstance(raw_point, list) and len(raw_point) == 2:
+        raw_x, raw_y = raw_point
+    else:
+        raise ValueError(f"quad {quad_index + 1} point {point_index + 1} must be [x, y] or {{x, y}}")
+    try:
+        x = float(raw_x)
+        y = float(raw_y)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"quad {quad_index + 1} point {point_index + 1} is not numeric") from exc
+    if not math.isfinite(x) or not math.isfinite(y):
+        raise ValueError(f"quad {quad_index + 1} point {point_index + 1} is not finite")
+    return (x, y)
+
+
+def make_location_picker_handler(state: LocationPickerState) -> type[BaseHTTPRequestHandler]:
+    class LocationPickerRequestHandler(BaseHTTPRequestHandler):
+        server_version = "WLEDRGBWWLocationPicker/1.0"
+
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                self._send_bytes(LOCATION_PICKER_HTML.encode("utf-8"), content_type="text/html; charset=utf-8")
+                return
+            if parsed.path == "/api/state":
+                self._send_json(state.snapshot())
+                return
+            if parsed.path == "/preview.png":
+                with state.lock:
+                    preview_png = state.preview_png
+                if preview_png is None:
+                    self._send_json({"error": "preview image is not ready"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                self._send_bytes(preview_png, content_type="image/png")
+                return
+            if parsed.path == "/favicon.ico":
+                self.send_response(HTTPStatus.NO_CONTENT)
+                self.end_headers()
+                return
+            self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            try:
+                payload = self._read_json_body()
+                if parsed.path == "/api/detect":
+                    response = state.detect_quads(
+                        rows=_required_int(payload, "rows"),
+                        cols=_required_int(payload, "cols"),
+                    )
+                elif parsed.path == "/api/retry":
+                    started = state.start_auto_exposure()
+                    response = state.snapshot()
+                    response["retry_started"] = started
+                elif parsed.path == "/api/save":
+                    response = state.save_quads(
+                        target_block_count=_required_int(payload, "target_block_count"),
+                        quads_payload=payload.get("quads"),
+                    )
+                else:
+                    self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
+                    return
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except RuntimeError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+                return
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(response)
+
+        def log_message(self, format: str, *args: object) -> None:
             return
-        self.root.update_idletasks()
-        canvas_w = max(1, self.canvas.winfo_width())
-        canvas_h = max(1, self.canvas.winfo_height())
-        self.zoom = min(canvas_w / self.image_width, canvas_h / self.image_height) * 0.96
-        self.zoom = max(0.02, min(8.0, self.zoom))
-        self.offset_x = (canvas_w - self.image_width * self.zoom) / 2
-        self.offset_y = (canvas_h - self.image_height * self.zoom) / 2
-        self.redraw()
 
-    def redraw(self) -> None:
-        self.canvas.delete("all")
-        if self.preview_image is None:
-            self.canvas.create_text(30, 30, anchor="nw", fill="#f0f0f0", text=self.status.get())
-            return
+        def _read_json_body(self) -> dict[str, Any]:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length > 2_000_000:
+                raise ValueError("request body is too large")
+            raw_body = self.rfile.read(content_length)
+            try:
+                payload = json.loads(raw_body.decode("utf-8") if raw_body else "{}")
+            except json.JSONDecodeError as exc:
+                raise ValueError("request body must be JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            return payload
 
-        scaled = resize_nearest_rgb(self.preview_image, self.zoom)
-        self.photo = tk.PhotoImage(data=rgb_to_ppm_photo_data(scaled), format="PPM")
-        self.image_item = self.canvas.create_image(self.offset_x, self.offset_y, anchor="nw", image=self.photo)
-
-        for index, quad in enumerate(self.quads):
-            self.draw_quad(quad, selected=index == self.selected_quad)
-        if self.create_preview is not None:
-            self.draw_quad(self.create_preview, selected=False, preview=True)
-        self._update_confirm_state()
-
-    def draw_quad(self, quad: Quad, *, selected: bool, preview: bool = False) -> None:
-        coords: list[float] = []
-        for point in quad:
-            x, y = self.image_to_canvas(point)
-            coords.extend([x, y])
-        color = "#ffcf40" if selected else "#40d8ff"
-        if preview:
-            color = "#b0b0b0"
-        self.canvas.create_polygon(coords, outline=color, fill="", width=2, tags=("quad",))
-        for vertex_index, point in enumerate(quad):
-            x, y = self.image_to_canvas(point)
-            radius = HANDLE_RADIUS + (2 if selected else 0)
-            self.canvas.create_oval(
-                x - radius,
-                y - radius,
-                x + radius,
-                y + radius,
-                outline=color,
-                fill="#202020",
-                width=2,
-                tags=("handle", f"v{vertex_index}"),
+        def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            self._send_bytes(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                content_type="application/json; charset=utf-8",
+                status=status,
             )
 
-    def image_to_canvas(self, point: Point) -> Point:
-        x, y = point
-        return (x * self.zoom + self.offset_x, y * self.zoom + self.offset_y)
+        def _send_bytes(
+            self,
+            data: bytes,
+            *,
+            content_type: str,
+            status: HTTPStatus = HTTPStatus.OK,
+        ) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
 
-    def canvas_to_image(self, point: Point) -> Point:
-        x, y = point
-        return ((x - self.offset_x) / self.zoom, (y - self.offset_y) / self.zoom)
+    return LocationPickerRequestHandler
 
-    def on_left_press(self, event: tk.Event) -> None:
-        if self.preview_image is None:
-            return
-        canvas_point = (float(event.x), float(event.y))
-        hit = self.hit_test(canvas_point)
-        if hit is not None:
-            mode, quad_index, sub_index = hit
-            self.selected_quad = quad_index
-            self.drag = DragState(
-                mode=mode,
-                start_canvas=canvas_point,
-                start_image=self.canvas_to_image(canvas_point),
-                quad_index=quad_index,
-                vertex_index=sub_index if mode == "vertex" else None,
-                edge_index=sub_index if mode == "edge" else None,
-                original_quad=list(self.quads[quad_index]),
-            )
-            self.redraw()
-            return
 
-        image_point = clamp_point(self.canvas_to_image(canvas_point), self.image_width, self.image_height)
-        self.selected_quad = None
-        self.drag = DragState(mode="create", start_canvas=canvas_point, start_image=image_point)
-        self.create_preview = [image_point, image_point, image_point, image_point]
-        self.redraw()
+def _required_int(payload: dict[str, Any], name: str) -> int:
+    if name not in payload:
+        raise ValueError(f"{name} is required")
+    try:
+        return int(payload[name])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
 
-    def on_left_drag(self, event: tk.Event) -> None:
-        if self.preview_image is None or self.drag is None:
-            return
-        image_point = clamp_point(self.canvas_to_image((float(event.x), float(event.y))), self.image_width, self.image_height)
-        if self.drag.mode == "create" and self.drag.start_image is not None:
-            self.create_preview = rect_to_quad(self.drag.start_image, image_point)
-        elif self.drag.original_quad is not None and self.drag.start_image is not None and self.drag.quad_index is not None:
-            dx = image_point[0] - self.drag.start_image[0]
-            dy = image_point[1] - self.drag.start_image[1]
-            quad = list(self.drag.original_quad)
-            if self.drag.mode == "move":
-                self.quads[self.drag.quad_index] = translate_quad(quad, dx, dy, self.image_width, self.image_height)
-            elif self.drag.mode == "vertex" and self.drag.vertex_index is not None:
-                quad[self.drag.vertex_index] = image_point
-                self.quads[self.drag.quad_index] = clamp_quad(quad, self.image_width, self.image_height)
-            elif self.drag.mode == "edge" and self.drag.edge_index is not None:
-                first = self.drag.edge_index
-                second = (first + 1) % 4
-                quad[first] = clamp_point((quad[first][0] + dx, quad[first][1] + dy), self.image_width, self.image_height)
-                quad[second] = clamp_point((quad[second][0] + dx, quad[second][1] + dy), self.image_width, self.image_height)
-                self.quads[self.drag.quad_index] = quad
-        self.redraw()
 
-    def on_left_release(self, event: tk.Event) -> None:
-        if self.drag is not None and self.drag.mode == "create" and self.create_preview is not None:
-            width = abs(self.create_preview[1][0] - self.create_preview[0][0])
-            height = abs(self.create_preview[2][1] - self.create_preview[1][1])
-            if width >= MIN_CREATE_PIXELS and height >= MIN_CREATE_PIXELS:
-                self.quads.append(self.create_preview)
-                self.selected_quad = len(self.quads) - 1
-        self.create_preview = None
-        self.drag = None
-        self.redraw()
-
-    def on_pan_press(self, event: tk.Event) -> None:
-        self.drag = DragState(mode="pan", start_canvas=(float(event.x), float(event.y)))
-
-    def on_pan_drag(self, event: tk.Event) -> None:
-        if self.drag is None or self.drag.mode != "pan":
-            return
-        x, y = float(event.x), float(event.y)
-        self.offset_x += x - self.drag.start_canvas[0]
-        self.offset_y += y - self.drag.start_canvas[1]
-        self.drag.start_canvas = (x, y)
-        self.redraw()
-
-    def on_mouse_wheel(self, event: tk.Event) -> None:
-        factor = 1.15 if event.delta > 0 else 1 / 1.15
-        self.zoom_at(event.x, event.y, factor)
-
-    def zoom_at(self, canvas_x: float, canvas_y: float, factor: float) -> None:
-        if self.preview_image is None:
-            return
-        before = self.canvas_to_image((canvas_x, canvas_y))
-        self.zoom = max(0.02, min(8.0, self.zoom * factor))
-        self.offset_x = canvas_x - before[0] * self.zoom
-        self.offset_y = canvas_y - before[1] * self.zoom
-        self.redraw()
-
-    def hit_test(self, canvas_point: Point) -> tuple[str, int, int | None] | None:
-        image_point = self.canvas_to_image(canvas_point)
-        for quad_index in range(len(self.quads) - 1, -1, -1):
-            quad = self.quads[quad_index]
-            for vertex_index, point in enumerate(quad):
-                handle = self.image_to_canvas(point)
-                if math.hypot(canvas_point[0] - handle[0], canvas_point[1] - handle[1]) <= HANDLE_RADIUS + 4:
-                    return ("vertex", quad_index, vertex_index)
-            for edge_index in range(4):
-                start = self.image_to_canvas(quad[edge_index])
-                end = self.image_to_canvas(quad[(edge_index + 1) % 4])
-                if distance_to_segment(canvas_point, start, end) <= EDGE_HIT_DISTANCE:
-                    return ("edge", quad_index, edge_index)
-            if point_in_polygon(image_point, quad):
-                return ("move", quad_index, None)
-        return None
-
-    def delete_selected(self) -> None:
-        if self.selected_quad is None:
-            return
-        del self.quads[self.selected_quad]
-        self.selected_quad = None
-        self.redraw()
-
-    def clear_quads(self) -> None:
-        self.quads.clear()
-        self.selected_quad = None
-        self.redraw()
-
-    def auto_detect_blocks(self) -> None:
-        if self.preview_image is None:
-            return
+def create_location_picker_server(
+    *,
+    host: str,
+    port: int,
+    state: LocationPickerState,
+    port_search_limit: int = 20,
+) -> ThreadingHTTPServer:
+    handler = make_location_picker_handler(state)
+    candidates = [0] if port == 0 else list(range(port, port + port_search_limit + 1))
+    last_error: OSError | None = None
+    for candidate in candidates:
         try:
-            rows = int(self.grid_rows.get())
-            cols = int(self.grid_cols.get())
-            quads = detect_color_checker_quads(self.preview_image, rows=rows, cols=cols)
-        except Exception as exc:
-            messagebox.showerror("自动识别失败", str(exc))
-            return
-        self.quads = quads
-        self.selected_quad = None
-        self.block_count.set(rows * cols)
-        self.status.set(f"已自动识别 {rows}x{cols} 色块")
-        self.redraw()
+            return ThreadingHTTPServer((host, candidate), handler)
+        except OSError as exc:
+            last_error = exc
+    if last_error is None:
+        raise RuntimeError("could not create location picker server")
+    raise last_error
 
-    def save_config(self) -> None:
-        if self.capture_result is None or self.preview_image is None:
-            return
-        try:
-            target_count = int(self.block_count.get())
-            config = build_location_config(
-                target_block_count=target_count,
-                image_width=self.image_width,
-                image_height=self.image_height,
-                quads=self.quads,
-                capture=self.capture_result.final_capture,
-            )
-            path = save_location_config(config)
-        except Exception as exc:
-            messagebox.showerror("保存失败", str(exc))
-            return
-        self.status.set(f"已保存: {path}")
-        messagebox.showinfo("已保存", str(path))
 
-    def _update_confirm_state(self) -> None:
-        try:
-            target = int(self.block_count.get())
-        except (tk.TclError, ValueError):
-            target = -1
-        enabled = self.capture_result is not None and target > 0 and len(self.quads) == target
-        self.confirm_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+LOCATION_PICKER_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WLED-RGBWW Location Picker</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #18191b;
+      --panel: #25282c;
+      --panel-2: #30343a;
+      --text: #f4f7fb;
+      --muted: #b8c0ca;
+      --line: #505965;
+      --cyan: #42d9ff;
+      --gold: #ffcf40;
+      --danger: #ff6b6b;
+      --ok: #69e0a3;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { overflow: hidden; }
+    .app { height: 100%; display: grid; grid-template-rows: auto 1fr auto; }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 48px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      white-space: nowrap;
+      overflow-x: auto;
+    }
+    label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+    input {
+      width: 68px;
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 8px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+    }
+    input.small { width: 54px; }
+    button {
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 0 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: #7a8798; background: #383d44; }
+    button:disabled { color: #7a828c; cursor: default; opacity: 0.7; }
+    button.primary { border-color: #809a46; background: #3c4a2d; color: #f8ffe8; }
+    button.danger { border-color: #8e4b4b; background: #4a3030; }
+    .statusbar {
+      min-height: 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 5px 10px;
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--muted);
+    }
+    .statusbar .strong { color: var(--text); }
+    .statusbar .error { color: var(--danger); }
+    .statusbar .saved { color: var(--ok); }
+    .canvas-wrap { position: relative; min-height: 0; background: #101113; }
+    canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      pointer-events: none;
+      color: var(--muted);
+      font-size: 15px;
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="toolbar">
+      <label>总色块数 <input id="blocks" type="number" min="1" max="1000" value="24"></label>
+      <label>行 <input id="rows" class="small" type="number" min="1" max="100" value="4"></label>
+      <label>列 <input id="cols" class="small" type="number" min="1" max="100" value="6"></label>
+      <button id="retry">重试相机</button>
+      <button id="detect">自动识别</button>
+      <button id="fit">适配窗口</button>
+      <button id="delete" class="danger">删除选中</button>
+      <button id="clear" class="danger">清空</button>
+      <button id="save" class="primary" disabled>确认保存</button>
+    </div>
+    <div class="canvas-wrap">
+      <canvas id="canvas"></canvas>
+      <div id="overlay" class="overlay">正在自动曝光...</div>
+    </div>
+    <div class="statusbar">
+      <span class="strong" id="count">0 / 24</span>
+      <span id="status">正在自动曝光...</span>
+      <span class="saved" id="saved"></span>
+    </div>
+  </div>
+  <script>
+    const HANDLE_RADIUS = 7;
+    const EDGE_HIT_DISTANCE = 8;
+    const MIN_CREATE_PIXELS = 6;
+
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const overlay = document.getElementById("overlay");
+    const blocksInput = document.getElementById("blocks");
+    const rowsInput = document.getElementById("rows");
+    const colsInput = document.getElementById("cols");
+    const retryButton = document.getElementById("retry");
+    const detectButton = document.getElementById("detect");
+    const fitButton = document.getElementById("fit");
+    const deleteButton = document.getElementById("delete");
+    const clearButton = document.getElementById("clear");
+    const saveButton = document.getElementById("save");
+    const statusEl = document.getElementById("status");
+    const countEl = document.getElementById("count");
+    const savedEl = document.getElementById("saved");
+
+    const state = {
+      hasImage: false,
+      image: null,
+      imageWidth: 0,
+      imageHeight: 0,
+      zoom: 1,
+      offsetX: 0,
+      offsetY: 0,
+      quads: [],
+      selectedQuad: -1,
+      drag: null,
+      createPreview: null,
+      fittedOnce: false,
+      loading: false,
+      retryAvailable: false
+    };
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.round(rect.width * dpr));
+      canvas.height = Math.max(1, Math.round(rect.height * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      draw();
+    }
+
+    function canvasSize() {
+      const rect = canvas.getBoundingClientRect();
+      return { width: rect.width, height: rect.height };
+    }
+
+    async function refreshState() {
+      const response = await fetch("/api/state");
+      const data = await response.json();
+      blocksInput.value = data.defaults.blocks;
+      rowsInput.value = data.defaults.rows;
+      colsInput.value = data.defaults.cols;
+      state.loading = Boolean(data.loading);
+      state.retryAvailable = Boolean(data.retry_available);
+      updateStatus(data.status, data.error);
+      if (data.saved_path) savedEl.textContent = data.saved_path;
+      if (data.has_image && !state.hasImage) {
+        state.imageWidth = data.image.width;
+        state.imageHeight = data.image.height;
+        await loadPreview();
+      }
+      updateControls();
+      if (!state.hasImage && data.loading) {
+        window.setTimeout(refreshState, 800);
+      }
+    }
+
+    async function loadPreview() {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = "/preview.png?t=" + Date.now();
+      await image.decode();
+      state.image = image;
+      state.hasImage = true;
+      overlay.classList.add("hidden");
+      fitToWindow();
+    }
+
+    function fitToWindow() {
+      if (!state.hasImage) return;
+      const size = canvasSize();
+      state.zoom = Math.max(0.02, Math.min(8, Math.min(size.width / state.imageWidth, size.height / state.imageHeight) * 0.96));
+      state.offsetX = (size.width - state.imageWidth * state.zoom) / 2;
+      state.offsetY = (size.height - state.imageHeight * state.zoom) / 2;
+      state.fittedOnce = true;
+      draw();
+    }
+
+    function draw() {
+      const size = canvasSize();
+      ctx.clearRect(0, 0, size.width, size.height);
+      ctx.fillStyle = "#101113";
+      ctx.fillRect(0, 0, size.width, size.height);
+      if (!state.hasImage || !state.image) {
+        updateControls();
+        return;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(state.image, state.offsetX, state.offsetY, state.imageWidth * state.zoom, state.imageHeight * state.zoom);
+      state.quads.forEach((quad, index) => drawQuad(quad, index === state.selectedQuad, false));
+      if (state.createPreview) drawQuad(state.createPreview, false, true);
+      updateControls();
+    }
+
+    function drawQuad(quad, selected, preview) {
+      const color = preview ? "#b9c0c8" : (selected ? "#ffcf40" : "#42d9ff");
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      quad.forEach((point, index) => {
+        const canvasPoint = imageToCanvas(point);
+        if (index === 0) ctx.moveTo(canvasPoint.x, canvasPoint.y);
+        else ctx.lineTo(canvasPoint.x, canvasPoint.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
+      quad.forEach((point) => {
+        const canvasPoint = imageToCanvas(point);
+        const radius = HANDLE_RADIUS + (selected ? 2 : 0);
+        ctx.beginPath();
+        ctx.arc(canvasPoint.x, canvasPoint.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = "#202327";
+        ctx.fill();
+        ctx.stroke();
+      });
+      ctx.restore();
+    }
+
+    function imageToCanvas(point) {
+      return { x: point[0] * state.zoom + state.offsetX, y: point[1] * state.zoom + state.offsetY };
+    }
+
+    function canvasToImage(point) {
+      return [(point.x - state.offsetX) / state.zoom, (point.y - state.offsetY) / state.zoom];
+    }
+
+    function eventPoint(event) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }
+
+    function clampPoint(point) {
+      return [
+        Math.min(Math.max(point[0], 0), state.imageWidth - 1),
+        Math.min(Math.max(point[1], 0), state.imageHeight - 1)
+      ];
+    }
+
+    function rectToQuad(start, end) {
+      const left = Math.min(start[0], end[0]);
+      const right = Math.max(start[0], end[0]);
+      const top = Math.min(start[1], end[1]);
+      const bottom = Math.max(start[1], end[1]);
+      return [[left, top], [right, top], [right, bottom], [left, bottom]];
+    }
+
+    function translateQuad(quad, dx, dy) {
+      let minX = Math.min(...quad.map((point) => point[0]));
+      let maxX = Math.max(...quad.map((point) => point[0]));
+      let minY = Math.min(...quad.map((point) => point[1]));
+      let maxY = Math.max(...quad.map((point) => point[1]));
+      if (minX + dx < 0) dx = -minX;
+      if (maxX + dx > state.imageWidth - 1) dx = state.imageWidth - 1 - maxX;
+      if (minY + dy < 0) dy = -minY;
+      if (maxY + dy > state.imageHeight - 1) dy = state.imageHeight - 1 - maxY;
+      return quad.map((point) => [point[0] + dx, point[1] + dy]);
+    }
+
+    function pointInPolygon(point, polygon) {
+      const x = point[0];
+      const y = point[1];
+      let inside = false;
+      for (let index = 0; index < polygon.length; index++) {
+        const current = polygon[index];
+        const next = polygon[(index + 1) % polygon.length];
+        if ((current[1] > y) !== (next[1] > y)) {
+          const intersectionX = (next[0] - current[0]) * (y - current[1]) / (next[1] - current[1]) + current[0];
+          if (x < intersectionX) inside = !inside;
+        }
+      }
+      return inside;
+    }
+
+    function distanceToSegment(point, start, end) {
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      if (dx === 0 && dy === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+      const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / (dx * dx + dy * dy)));
+      return Math.hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy));
+    }
+
+    function hitTest(canvasPoint) {
+      const imagePoint = canvasToImage(canvasPoint);
+      for (let quadIndex = state.quads.length - 1; quadIndex >= 0; quadIndex--) {
+        const quad = state.quads[quadIndex];
+        for (let vertexIndex = 0; vertexIndex < 4; vertexIndex++) {
+          const handle = imageToCanvas(quad[vertexIndex]);
+          if (Math.hypot(canvasPoint.x - handle.x, canvasPoint.y - handle.y) <= HANDLE_RADIUS + 4) {
+            return { mode: "vertex", quadIndex, subIndex: vertexIndex };
+          }
+        }
+        for (let edgeIndex = 0; edgeIndex < 4; edgeIndex++) {
+          const start = imageToCanvas(quad[edgeIndex]);
+          const end = imageToCanvas(quad[(edgeIndex + 1) % 4]);
+          if (distanceToSegment(canvasPoint, start, end) <= EDGE_HIT_DISTANCE) {
+            return { mode: "edge", quadIndex, subIndex: edgeIndex };
+          }
+        }
+        if (pointInPolygon(imagePoint, quad)) return { mode: "move", quadIndex, subIndex: null };
+      }
+      return null;
+    }
+
+    function zoomAt(canvasPoint, factor) {
+      if (!state.hasImage) return;
+      const before = canvasToImage(canvasPoint);
+      state.zoom = Math.max(0.02, Math.min(8, state.zoom * factor));
+      state.offsetX = canvasPoint.x - before[0] * state.zoom;
+      state.offsetY = canvasPoint.y - before[1] * state.zoom;
+      draw();
+    }
+
+    canvas.addEventListener("mousedown", (event) => {
+      if (!state.hasImage) return;
+      const point = eventPoint(event);
+      if (event.button === 1 || event.button === 2) {
+        state.drag = { mode: "pan", startCanvas: point };
+        event.preventDefault();
+        return;
+      }
+      if (event.button !== 0) return;
+      const hit = hitTest(point);
+      if (hit) {
+        state.selectedQuad = hit.quadIndex;
+        state.drag = {
+          mode: hit.mode,
+          startCanvas: point,
+          startImage: canvasToImage(point),
+          quadIndex: hit.quadIndex,
+          subIndex: hit.subIndex,
+          originalQuad: state.quads[hit.quadIndex].map((item) => [...item])
+        };
+      } else {
+        const imagePoint = clampPoint(canvasToImage(point));
+        state.selectedQuad = -1;
+        state.drag = { mode: "create", startCanvas: point, startImage: imagePoint };
+        state.createPreview = [imagePoint, imagePoint, imagePoint, imagePoint];
+      }
+      draw();
+      event.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (event) => {
+      if (!state.drag || !state.hasImage) return;
+      const point = eventPoint(event);
+      if (state.drag.mode === "pan") {
+        state.offsetX += point.x - state.drag.startCanvas.x;
+        state.offsetY += point.y - state.drag.startCanvas.y;
+        state.drag.startCanvas = point;
+        draw();
+        return;
+      }
+      const imagePoint = clampPoint(canvasToImage(point));
+      if (state.drag.mode === "create") {
+        state.createPreview = rectToQuad(state.drag.startImage, imagePoint);
+      } else {
+        const dx = imagePoint[0] - state.drag.startImage[0];
+        const dy = imagePoint[1] - state.drag.startImage[1];
+        const quad = state.drag.originalQuad.map((item) => [...item]);
+        if (state.drag.mode === "move") {
+          state.quads[state.drag.quadIndex] = translateQuad(quad, dx, dy);
+        } else if (state.drag.mode === "vertex") {
+          quad[state.drag.subIndex] = imagePoint;
+          state.quads[state.drag.quadIndex] = quad.map(clampPoint);
+        } else if (state.drag.mode === "edge") {
+          const first = state.drag.subIndex;
+          const second = (first + 1) % 4;
+          quad[first] = clampPoint([quad[first][0] + dx, quad[first][1] + dy]);
+          quad[second] = clampPoint([quad[second][0] + dx, quad[second][1] + dy]);
+          state.quads[state.drag.quadIndex] = quad;
+        }
+      }
+      draw();
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (state.drag && state.drag.mode === "create" && state.createPreview) {
+        const width = Math.abs(state.createPreview[1][0] - state.createPreview[0][0]);
+        const height = Math.abs(state.createPreview[2][1] - state.createPreview[1][1]);
+        if (width >= MIN_CREATE_PIXELS && height >= MIN_CREATE_PIXELS) {
+          state.quads.push(state.createPreview);
+          state.selectedQuad = state.quads.length - 1;
+        }
+      }
+      state.createPreview = null;
+      state.drag = null;
+      draw();
+    });
+
+    canvas.addEventListener("wheel", (event) => {
+      zoomAt(eventPoint(event), event.deltaY < 0 ? 1.15 : 1 / 1.15);
+      event.preventDefault();
+    }, { passive: false });
+
+    canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Delete" || event.key === "Backspace") {
+        deleteSelected();
+        event.preventDefault();
+      }
+    });
+
+    function deleteSelected() {
+      if (state.selectedQuad < 0) return;
+      state.quads.splice(state.selectedQuad, 1);
+      state.selectedQuad = -1;
+      draw();
+    }
+
+    function clearQuads() {
+      state.quads = [];
+      state.selectedQuad = -1;
+      draw();
+    }
+
+    async function postJson(path, payload) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || response.statusText);
+      return data;
+    }
+
+    async function autoDetect() {
+      if (!state.hasImage) return;
+      try {
+        updateStatus("正在自动识别...", null);
+        const rows = parseInt(rowsInput.value, 10);
+        const cols = parseInt(colsInput.value, 10);
+        const data = await postJson("/api/detect", { rows, cols });
+        state.quads = data.quads;
+        state.selectedQuad = -1;
+        blocksInput.value = data.target_block_count;
+        updateStatus(data.status, null);
+        draw();
+      } catch (error) {
+        updateStatus("自动识别失败: " + error.message, error.message);
+      }
+    }
+
+    function resetImageState() {
+      state.hasImage = false;
+      state.image = null;
+      state.imageWidth = 0;
+      state.imageHeight = 0;
+      state.zoom = 1;
+      state.offsetX = 0;
+      state.offsetY = 0;
+      state.quads = [];
+      state.selectedQuad = -1;
+      state.drag = null;
+      state.createPreview = null;
+      state.fittedOnce = false;
+      savedEl.textContent = "";
+      draw();
+    }
+
+    async function retryCamera() {
+      try {
+        resetImageState();
+        state.loading = true;
+        state.retryAvailable = false;
+        updateStatus("正在自动曝光...", null);
+        updateControls();
+        const data = await postJson("/api/retry", {});
+        state.loading = Boolean(data.loading);
+        state.retryAvailable = Boolean(data.retry_available);
+        updateStatus(data.status, data.error);
+        updateControls();
+        window.setTimeout(refreshState, 800);
+      } catch (error) {
+        state.loading = false;
+        state.retryAvailable = true;
+        updateStatus("重试失败: " + error.message, error.message);
+        updateControls();
+      }
+    }
+
+    async function saveConfig() {
+      if (!state.hasImage) return;
+      try {
+        const target = parseInt(blocksInput.value, 10);
+        const data = await postJson("/api/save", { target_block_count: target, quads: state.quads });
+        updateStatus(data.status, null);
+        savedEl.textContent = data.path;
+      } catch (error) {
+        updateStatus("保存失败: " + error.message, error.message);
+      }
+    }
+
+    function updateStatus(message, error) {
+      statusEl.textContent = message || "";
+      statusEl.className = error ? "error" : "";
+      overlay.textContent = message || "";
+      if (state.hasImage) overlay.classList.add("hidden");
+      else overlay.classList.remove("hidden");
+    }
+
+    function updateControls() {
+      const target = parseInt(blocksInput.value, 10);
+      const ready = state.hasImage;
+      const saveReady = ready && Number.isFinite(target) && target > 0 && state.quads.length === target;
+      retryButton.disabled = state.loading || ready || !state.retryAvailable;
+      detectButton.disabled = !ready;
+      fitButton.disabled = !ready;
+      deleteButton.disabled = !ready || state.selectedQuad < 0;
+      clearButton.disabled = !ready || state.quads.length === 0;
+      saveButton.disabled = !saveReady;
+      countEl.textContent = state.quads.length + " / " + (Number.isFinite(target) ? target : "-");
+    }
+
+    blocksInput.addEventListener("input", updateControls);
+    retryButton.addEventListener("click", retryCamera);
+    detectButton.addEventListener("click", autoDetect);
+    fitButton.addEventListener("click", fitToWindow);
+    deleteButton.addEventListener("click", deleteSelected);
+    clearButton.addEventListener("click", clearQuads);
+    saveButton.addEventListener("click", saveConfig);
+    window.addEventListener("resize", resizeCanvas);
+
+    resizeCanvas();
+    refreshState().catch((error) => updateStatus("状态加载失败: " + error.message, error.message));
+  </script>
+</body>
+</html>
+"""
 
 
 def rect_to_quad(start: Point, end: Point) -> Quad:
@@ -1313,10 +1836,13 @@ def rect_to_quad(start: Point, end: Point) -> Quad:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture a calibration image and mark color-block locations.")
+    parser = argparse.ArgumentParser(description="Capture a calibration image and mark color-block locations in a local Web UI.")
     parser.add_argument("--blocks", type=int, default=24, help="Expected total color-block count.")
     parser.add_argument("--rows", type=int, default=4, help="Grid row count for automatic block detection.")
     parser.add_argument("--cols", type=int, default=6, help="Grid column count for automatic block detection.")
+    parser.add_argument("--host", default=DEFAULT_UI_HOST, help="Local Web UI bind host.")
+    parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT, help="Local Web UI bind port; uses the next free port if occupied.")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open the local Web UI in the default browser.")
     parser.add_argument("--target-max", type=int, default=DEFAULT_TARGET_MAX)
     parser.add_argument("--iso", default=DEFAULT_ISO)
     parser.add_argument("--aperture", default=DEFAULT_APERTURE)
@@ -1324,7 +1850,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-shutter-speed", default=DEFAULT_MAX_SHUTTER_SPEED)
     parser.add_argument("--max-exposure-trials", type=int, default=DEFAULT_MAX_EXPOSURE_TRIALS)
     parser.add_argument("--model", default=camera_gphoto2.DEFAULT_CAMERA_MODEL)
-    parser.add_argument("--port")
+    parser.add_argument("--port", dest="camera_port", help="Camera USB port passed to gphoto2.")
+    parser.add_argument("--camera-port", dest="camera_port", help="Camera USB port passed to gphoto2.")
     parser.add_argument("--gphoto2", default="gphoto2")
     parser.add_argument("--timeout", type=float, default=90.0)
     return parser.parse_args(argv)
@@ -1332,9 +1859,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    root = tk.Tk()
-    LocationPickerApp(root, args)
-    root.mainloop()
+    state = LocationPickerState(args=args)
+    server = create_location_picker_server(host=args.host, port=args.ui_port, state=state)
+    bound_host, bound_port = server.server_address[:2]
+    url = f"http://{bound_host}:{bound_port}/"
+    print(f"Location picker Web UI: {url}")
+    print("Press Ctrl+C to stop.")
+    state.start_auto_exposure()
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping location picker Web UI.")
+    finally:
+        server.server_close()
     return 0
 
 
