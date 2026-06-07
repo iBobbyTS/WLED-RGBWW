@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from camera_based_rgbww_optimizer.paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_INPUT_PATH = PROJECT_ROOT / "tmp/channel-response/merged/channel-code-duty-response-merged.json"
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "config/channel/code-duty-curve.json"
 DEFAULT_BRIGHTNESS_KEY = "max_ambient_subtracted_mean_per_second"
@@ -32,7 +32,7 @@ def build_code_duty_curve(
     curve: dict[str, Any] = {
         "version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "kind": "wled_rgbww_code_duty_curve",
+        "kind": "camera_based_rgbww_optimizer_code_duty_curve",
         "source_kind": merged.get("kind"),
         "source_created_at": merged.get("created_at"),
         "source_files": merged.get("source_files", []),

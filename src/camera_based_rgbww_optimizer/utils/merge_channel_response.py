@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from camera_based_rgbww_optimizer.paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "tmp" / "channel-response" / "merged"
 DEFAULT_CODES = (
     4095,
@@ -58,7 +58,7 @@ def merge_channel_responses(
     merged: dict[str, Any] = {
         "version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "kind": "merged_wled_rgbww_channel_code_response",
+        "kind": "merged_camera_based_rgbww_optimizer_channel_code_response",
         "codes": [int(code) for code in codes],
         "channels": list(CHANNEL_ORDER),
         "channel_aliases": {},

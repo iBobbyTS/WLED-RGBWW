@@ -1,5 +1,0 @@
-packages:
-  common: !include wled-bedroom-rgbww-common.yaml
-
-esphome:
-  build_path: build/wled-bedroom-rgbww-no-webui

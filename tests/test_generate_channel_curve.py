@@ -1,6 +1,6 @@
 import unittest
 
-import generate_channel_curve
+from camera_based_rgbww_optimizer.utils import generate_channel_curve
 
 
 def measurement(channel, code, response):
@@ -15,7 +15,7 @@ def measurement(channel, code, response):
 class GenerateChannelCurveTests(unittest.TestCase):
     def test_build_channel_curve_filters_non_monotonic_points(self):
         merged = {
-            "kind": "merged_wled_rgbww_channel_code_response",
+            "kind": "merged_camera_based_rgbww_optimizer_channel_code_response",
             "codes": [4095, 16, 12, 8],
             "channels": ["cw"],
             "measurements": [

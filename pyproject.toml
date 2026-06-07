@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "camera-based-rgbww-optimizer"
+version = "0.1.0"
+description = "Camera-based RGBWW calibration and optimization tooling."
+requires-python = ">=3.11"
+dependencies = [
+    "aioesphomeapi",
+    "cryptography",
+    "numpy",
+    "opencv-contrib-python-headless",
+    "rawpy",
+    "tifffile",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

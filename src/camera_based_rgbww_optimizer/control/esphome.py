@@ -3,15 +3,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from camera_based_rgbww_optimizer.paths import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_HOST = "wled-bedroom-rgbww.local"
+DEFAULT_HOST = os.environ.get("CAMERA_BASED_RGBWW_OPTIMIZER_ESPHOME_HOST", "bedroom-rgbww-strip.local")
 DEFAULT_PORT = 6053
-DEFAULT_EXPECTED_NAME = "wled-bedroom-rgbww"
+DEFAULT_EXPECTED_NAME = os.environ.get("CAMERA_BASED_RGBWW_OPTIMIZER_ESPHOME_EXPECTED_NAME", "bedroom-rgbww-strip")
 DEFAULT_SECRETS_PATH = PROJECT_ROOT / "firmware/esphome/secrets.yaml"
 DEFAULT_CURVE_PATH = PROJECT_ROOT / "config/channel/code-duty-curve.json"
 
@@ -29,6 +30,7 @@ def light(
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    expected_name: str = DEFAULT_EXPECTED_NAME,
     secrets_path: str | Path = DEFAULT_SECRETS_PATH,
     curve_path: str | Path | None = DEFAULT_CURVE_PATH,
 ) -> dict[str, int]:
@@ -41,7 +43,9 @@ def light(
     If all converted values are zero, the ESPHome `all_off` action is called.
     """
 
-    return asyncio.run(async_light(cw, ww, r, g, b, host=host, port=port, secrets_path=secrets_path, curve_path=curve_path))
+    return asyncio.run(
+        async_light(cw, ww, r, g, b, host=host, port=port, expected_name=expected_name, secrets_path=secrets_path, curve_path=curve_path)
+    )
 
 
 async def async_light(
@@ -53,6 +57,7 @@ async def async_light(
     *,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
+    expected_name: str = DEFAULT_EXPECTED_NAME,
     secrets_path: str | Path = DEFAULT_SECRETS_PATH,
     curve_path: str | Path | None = DEFAULT_CURVE_PATH,
 ) -> dict[str, int]:
@@ -67,7 +72,7 @@ async def async_light(
         port,
         None,
         noise_psk=api_key,
-        expected_name=DEFAULT_EXPECTED_NAME,
+        expected_name=expected_name,
     )
     await client.connect(login=True)
     try:
@@ -156,18 +161,31 @@ def _load_api_encryption_key(secrets_path: str | Path) -> str:
 
 
 def _main() -> int:
-    parser = argparse.ArgumentParser(description="Set WLED RGBWW ESPHome channel codes.")
+    parser = argparse.ArgumentParser(description="Set RGBWW ESPHome channel codes.")
     parser.add_argument("cw", type=int)
     parser.add_argument("ww", type=int)
     parser.add_argument("r", type=int)
     parser.add_argument("g", type=int)
     parser.add_argument("b", type=int)
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--expected-name", default=DEFAULT_EXPECTED_NAME)
     parser.add_argument("--curve", type=Path, default=DEFAULT_CURVE_PATH, help="Optional code-duty curve JSON path.")
     parser.add_argument("--no-curve", action="store_true", help="Disable code-duty curve correction.")
     args = parser.parse_args()
 
     curve_path = None if args.no_curve else args.curve
-    payload = light(args.cw, args.ww, args.r, args.g, args.b, curve_path=curve_path)
+    payload = light(
+        args.cw,
+        args.ww,
+        args.r,
+        args.g,
+        args.b,
+        host=args.host,
+        port=args.port,
+        expected_name=args.expected_name,
+        curve_path=curve_path,
+    )
     action = OFF_SERVICE if _is_all_zero(payload) else SET_SERVICE
     print(f"{action}: {payload}")
     return 0

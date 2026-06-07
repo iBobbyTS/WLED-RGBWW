@@ -1,8 +1,8 @@
 packages:
-  common: !include wled-bedroom-rgbww-common.yaml
+  common: !include bedroom-rgbww-strip-common.yaml
 
 esphome:
-  build_path: build/wled-bedroom-rgbww-webui
+  build_path: build/bedroom-rgbww-strip-webui
 
 web_server:
   port: 80

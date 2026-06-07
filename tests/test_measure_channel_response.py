@@ -5,8 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-import camera_gphoto2
-import measure_channel_response
+from camera_based_rgbww_optimizer.control import camera_gphoto2
+from camera_based_rgbww_optimizer.optimization import measure_channel_response
 
 
 def project_temp_dir():

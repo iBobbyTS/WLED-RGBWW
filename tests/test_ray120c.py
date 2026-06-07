@@ -3,7 +3,7 @@ import unittest
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-import ray120c
+from camera_based_rgbww_optimizer.control import ray120c
 
 
 class Ray120cTokenTests(unittest.TestCase):

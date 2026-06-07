@@ -1,6 +1,6 @@
 substitutions:
-  device_name: wled-bedroom-rgbww
-  friendly_name: WLED Bedroom RGBWW
+  device_name: bedroom-rgbww-strip
+  friendly_name: Bedroom RGBWW Strip
   pwm_frequency: 19531Hz
 
 esphome:
@@ -67,7 +67,7 @@ wifi:
   power_save_mode: none
   reboot_timeout: 0s
   ap:
-    ssid: "WLED RGBWW Fallback"
+    ssid: "Bedroom RGBWW Strip Fallback"
     password: !secret fallback_ap_password
     ap_timeout: 90s
 

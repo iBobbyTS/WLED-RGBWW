@@ -11,8 +11,8 @@ from unittest import mock
 
 import numpy as np
 
-import camera_gphoto2
-import location_picker_ui
+from camera_based_rgbww_optimizer.control import camera_gphoto2
+from camera_based_rgbww_optimizer.interaction import location_picker_ui
 
 
 class LocationArgsTests(unittest.TestCase):

@@ -1,9 +1,13 @@
 import unittest
 
-import esphome
+from camera_based_rgbww_optimizer.control import esphome
 
 
 class LightPayloadTests(unittest.TestCase):
+    def test_default_device_identity_uses_physical_fixture_name(self):
+        self.assertEqual(esphome.DEFAULT_HOST, "bedroom-rgbww-strip.local")
+        self.assertEqual(esphome.DEFAULT_EXPECTED_NAME, "bedroom-rgbww-strip")
+
     def test_build_payload_uses_cw_ww_r_g_b_call_order(self):
         self.assertEqual(
             esphome._build_payload(cw=1, ww=2, r=3, g=4, b=5),

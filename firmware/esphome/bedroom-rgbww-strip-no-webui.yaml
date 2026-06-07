@@ -1,0 +1,5 @@
+packages:
+  common: !include bedroom-rgbww-strip-common.yaml
+
+esphome:
+  build_path: build/bedroom-rgbww-strip-no-webui

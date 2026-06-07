@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import merge_channel_response
+from camera_based_rgbww_optimizer.utils import merge_channel_response
 
 
 def make_run(path: Path, *, status: str, channel: str, codes: list[int]) -> Path:

@@ -1,3 +1,3 @@
 # Default candidate for interactive use. Keep explicit build records in README.md.
 packages:
-  webui: !include wled-bedroom-rgbww-webui.yaml
+  webui: !include bedroom-rgbww-strip-webui.yaml

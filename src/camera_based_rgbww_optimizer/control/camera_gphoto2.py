@@ -12,7 +12,8 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-import location_regions
+from camera_based_rgbww_optimizer.paths import PROJECT_TMP_DIR
+from camera_based_rgbww_optimizer.utils import location_regions
 
 
 DEFAULT_CAMERA_MODEL = "Canon EOS R6 Mark III"
@@ -40,7 +41,6 @@ CONFIG_ISO = "/main/imgsettings/iso"
 CONFIG_APERTURE = "/main/capturesettings/aperture"
 CONFIG_SHUTTER_SPEED = "/main/capturesettings/shutterspeed"
 CONFIG_IMAGE_FORMAT = "/main/imgsettings/imageformat"
-PROJECT_TMP_DIR = Path(__file__).resolve().parent / "tmp"
 
 
 class GPhoto2Error(RuntimeError):

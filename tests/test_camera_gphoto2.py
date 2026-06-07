@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-import camera_gphoto2
+from camera_based_rgbww_optimizer.control import camera_gphoto2
 
 
 class CameraGPhoto2ParseTests(unittest.TestCase):

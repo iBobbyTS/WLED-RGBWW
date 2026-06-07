@@ -1,4 +1,6 @@
-Min brighess
-12bit
-CW, WW, G, B: 8
-R: 9
+# Camera-Based RGBWW Optimizer
+
+Camera-based calibration and optimization tooling for RGBWW lighting.
+
+Read `docs/README.md` for current setup, package commands, measurement workflow,
+and calibration strategy.

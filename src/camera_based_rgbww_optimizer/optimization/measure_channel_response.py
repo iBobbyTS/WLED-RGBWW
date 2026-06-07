@@ -8,13 +8,11 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-import camera_gphoto2
-import esphome
-import location_regions
+from camera_based_rgbww_optimizer.control import camera_gphoto2, esphome
+from camera_based_rgbww_optimizer.paths import PROJECT_ROOT, PROJECT_TMP_DIR
+from camera_based_rgbww_optimizer.utils import location_regions
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-PROJECT_TMP_DIR = PROJECT_ROOT / "tmp"
 DEFAULT_OUTPUT_ROOT = PROJECT_TMP_DIR / "channel-response"
 DEFAULT_AUTO_EXPOSURE_METERING_LOCATION_CONFIG = PROJECT_ROOT / "config" / "location" / "locations-20260605-225800.json"
 DEFAULT_CODE_VALUES = (
@@ -373,7 +371,7 @@ def run_channel_response(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(run_dir),
         "measurement": {
-            "kind": "wled_rgbww_channel_code_response",
+            "kind": "camera_based_rgbww_optimizer_channel_code_response",
             "channels": list(channels),
             "codes": [int(code) for code in codes],
             "max_code": int(max_code),
@@ -385,7 +383,7 @@ def run_channel_response(
             "regions": _jsonable_regions(regions),
             "notes": [
                 "Signal values are decoded linear camera RGB and normalized by shutter seconds.",
-                "Ray120c is not part of this measurement; this records the WLED channel response only.",
+                "Ray120c is not part of this measurement; this records the RGBWW fixture channel response only.",
                 "Codes are measured from high to low; once a channel is ambient-limited at the longest shutter, lower codes are skipped.",
             ],
         },
@@ -541,7 +539,7 @@ def run_channel_response(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Measure WLED RGBWW per-channel code/duty response with auto exposure.")
+    parser = argparse.ArgumentParser(description="Measure RGBWW fixture per-channel code/duty response with auto exposure.")
     parser.add_argument("--channels", type=parse_channels, default=DEFAULT_CHANNELS)
     parser.add_argument(
         "--codes",

@@ -15,11 +15,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import camera_gphoto2
+from camera_based_rgbww_optimizer.control import camera_gphoto2
+from camera_based_rgbww_optimizer.paths import PROJECT_ROOT, PROJECT_TMP_DIR
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-PROJECT_TMP_DIR = PROJECT_ROOT / "tmp"
 LOCATION_TMP_DIR = PROJECT_TMP_DIR / "location-ui"
 CONFIG_LOCATION_DIR = PROJECT_ROOT / "config" / "location"
 
@@ -1296,7 +1295,7 @@ def _parse_payload_point(raw_point: Any, *, quad_index: int, point_index: int) -
 
 def make_location_picker_handler(state: LocationPickerState) -> type[BaseHTTPRequestHandler]:
     class LocationPickerRequestHandler(BaseHTTPRequestHandler):
-        server_version = "WLEDRGBWWLocationPicker/1.0"
+        server_version = "CameraBasedRGBWWOptimizerLocationPicker/1.0"
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -1438,7 +1437,7 @@ LOCATION_PICKER_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WLED-RGBWW Location Picker</title>
+  <title>Camera-Based RGBWW Optimizer Location Picker</title>
   <style>
     :root {
       color-scheme: dark;
